@@ -21,25 +21,25 @@ export const registerScriptCrudRoutes = (app: Express, ctx: RouteContext) => {
   });
 
   app.post("/api/scripts", ctx.requireAuth, (req, res) => {
-    const { name, code, endpoint, testParams } = req.body;
+    const { name, code, endpoint, testParams, triggerConfig } = req.body;
     if (!name || !code || !endpoint) return res.status(400).json({ error: "Missing fields" });
 
     const id = uuidv4();
     try {
-      createScript(id, name, code, endpoint, testParams || "{}");
-      res.json({ id, name, code, endpoint, testParams: testParams || "{}" });
+      createScript(id, name, code, endpoint, testParams || "{}", triggerConfig || "{}");
+      res.json({ id, name, code, endpoint, testParams: testParams || "{}", trigger_config: triggerConfig || "{}" });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
   app.put("/api/scripts/:id", ctx.requireAuth, (req, res) => {
-    const { name, code, endpoint, testParams } = req.body;
+    const { name, code, endpoint, testParams, triggerConfig } = req.body;
     if (!name || !code || !endpoint) return res.status(400).json({ error: "Missing fields" });
 
     try {
-      updateScript(req.params.id, name, code, endpoint, testParams || "{}");
-      res.json({ id: req.params.id, name, code, endpoint, testParams: testParams || "{}" });
+      updateScript(req.params.id, name, code, endpoint, testParams || "{}", triggerConfig || "{}");
+      res.json({ id: req.params.id, name, code, endpoint, testParams: testParams || "{}", trigger_config: triggerConfig || "{}" });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
