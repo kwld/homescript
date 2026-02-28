@@ -5,8 +5,10 @@ import { getScriptByEndpoint } from "../../db.js";
 import { HomeScriptEngine, HomeScriptTraceEvent } from "../../../shared/homescript.js";
 import { ExecutionEvent, ExecutionReport, HAStateEvent } from "../../../shared/execution-report.js";
 import { createRateLimit } from "../rate-limit.js";
+import { createRunDebugAccessMiddleware } from "../run-debug-access.js";
 
 export const registerRunRoutes = (app: Express, ctx: RouteContext) => {
+  const debugAccessMiddleware = createRunDebugAccessMiddleware();
   const runRateLimit = createRateLimit({
     maxRequests: 60,
     windowMs: 60_000,
@@ -15,16 +17,17 @@ export const registerRunRoutes = (app: Express, ctx: RouteContext) => {
     errorMessage: "Too many execution requests",
   });
 
-  app.post("/api/run/:endpoint", ctx.requireAuth, runRateLimit, async (req, res) => {
+  const handleRun = async (req: any, res: any, source: "get" | "post") => {
     const script = getScriptByEndpoint(req.params.endpoint);
     if (!script) return res.status(404).json({ error: "Endpoint not found" });
 
-    const variables = { ...req.query, ...req.body };
+    const variables = source === "get" ? { ...req.query } : { ...(req.body || {}) };
     const startedAt = Date.now();
     const requestId = uuidv4();
     const events: ExecutionEvent[] = [];
     const haStates: HAStateEvent[] = [];
-    const authMode: "jwt" | "service_key" | "mock" | "unknown" =
+    const authMode: "jwt" | "service_key" | "debug_bypass" | "mock" | "unknown" =
+      (req as any).debugBypassAuth ? "debug_bypass" :
       (req as any).serviceAccount ? "service_key" :
       (req as any).user?.id === "admin" && ctx.USE_MOCKS ? "mock" :
       (req as any).user ? "jwt" : "unknown";
@@ -43,6 +46,7 @@ export const registerRunRoutes = (app: Express, ctx: RouteContext) => {
 
     const engine = new HomeScriptEngine({
       variables,
+      queryParams: req.query as Record<string, any>,
       onEvent: (event) => {
         logEvent({
           source: "engine",
@@ -316,6 +320,7 @@ export const registerRunRoutes = (app: Express, ctx: RouteContext) => {
       };
       res.json({ ...result, report });
     } catch (e: any) {
+      const statusCode = typeof e?.statusCode === "number" ? e.statusCode : 400;
       logEvent({
         source: "backend",
         level: "error",
@@ -337,10 +342,18 @@ export const registerRunRoutes = (app: Express, ctx: RouteContext) => {
           authMode,
           haMode,
           durationMs: Date.now() - startedAt,
-          httpStatus: 400,
+          httpStatus: statusCode,
         },
       };
-      res.status(400).json({ error: e.message, line: e.line, report });
+      res.status(statusCode).json({ error: e.message, line: e.line, report });
     }
+  };
+
+  app.get("/api/run/:endpoint", debugAccessMiddleware, ctx.requireAuth, runRateLimit, async (req, res) => {
+    await handleRun(req, res, "get");
+  });
+
+  app.post("/api/run/:endpoint", debugAccessMiddleware, ctx.requireAuth, runRateLimit, async (req, res) => {
+    await handleRun(req, res, "post");
   });
 };

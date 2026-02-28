@@ -16,12 +16,22 @@ interface NewCredentials {
   serviceSecret: string;
 }
 
+interface DebugAccessSettings {
+  enabled: boolean;
+  whitelist: string[];
+  updatedAt: string | null;
+}
+
 export default function ServiceAccounts() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [name, setName] = useState("");
   const [newCredentials, setNewCredentials] = useState<NewCredentials | null>(null);
   const [copied, setCopied] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [debugAccess, setDebugAccess] = useState<DebugAccessSettings>({ enabled: false, whitelist: [], updatedAt: null });
+  const [debugWhitelistText, setDebugWhitelistText] = useState("");
+  const [debugSaveState, setDebugSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [debugSaveError, setDebugSaveError] = useState<string | null>(null);
 
   const fetchAccounts = async () => {
     const token = localStorage.getItem("auth_token");
@@ -31,8 +41,20 @@ export default function ServiceAccounts() {
     if (res.ok) setAccounts(await res.json());
   };
 
+  const fetchDebugAccess = async () => {
+    const token = localStorage.getItem("auth_token");
+    const res = await fetch("/api/debug-access", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as DebugAccessSettings;
+    setDebugAccess(data);
+    setDebugWhitelistText((data.whitelist || []).join("\n"));
+  };
+
   useEffect(() => {
     fetchAccounts();
+    fetchDebugAccess();
   }, []);
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -79,6 +101,38 @@ export default function ServiceAccounts() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const handleSaveDebugAccess = async () => {
+    setDebugSaveState("saving");
+    setDebugSaveError(null);
+    const token = localStorage.getItem("auth_token");
+    const whitelist = debugWhitelistText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const res = await fetch("/api/debug-access", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        enabled: debugAccess.enabled,
+        whitelist,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed to save debug access settings" }));
+      setDebugSaveState("error");
+      setDebugSaveError(err.error || "Failed to save debug access settings");
+      return;
+    }
+    const data = (await res.json()) as DebugAccessSettings;
+    setDebugAccess(data);
+    setDebugWhitelistText((data.whitelist || []).join("\n"));
+    setDebugSaveState("saved");
+    setTimeout(() => setDebugSaveState("idle"), 1500);
   };
 
   return (
@@ -134,6 +188,46 @@ export default function ServiceAccounts() {
         <div className="font-mono text-xs text-emerald-300 bg-zinc-950 border border-zinc-800 rounded-xl p-3">
           <div>x-service-id: &lt;service_account_id&gt;</div>
           <div>x-service-secret: &lt;service_account_secret&gt;</div>
+        </div>
+      </div>
+
+      <div className={`mb-6 rounded-2xl p-4 border ${debugAccess.enabled ? "bg-red-950/40 border-red-700/60" : "bg-zinc-900 border-zinc-800"}`}>
+        <h2 className={`text-lg font-medium mb-2 ${debugAccess.enabled ? "text-red-300" : "text-zinc-200"}`}>
+          Debug Bypass Mode
+        </h2>
+        <p className="text-sm text-zinc-300 mb-3">
+          When enabled, <code className="bg-zinc-950 px-1 py-0.5 rounded">/api/run/*</code> can skip service secret verification only if all are true:
+          service ID exists, and caller IP matches whitelist.
+        </p>
+        {debugAccess.enabled && (
+          <div className="mb-3 rounded-xl border border-red-600/60 bg-red-500/15 px-3 py-2 text-sm text-red-200">
+            ALERT: Debug bypass is ON. UI is forced into red warning mode.
+          </div>
+        )}
+        <label className="inline-flex items-center gap-2 text-sm text-zinc-200 mb-3">
+          <input
+            type="checkbox"
+            checked={debugAccess.enabled}
+            onChange={(e) => setDebugAccess((prev) => ({ ...prev, enabled: e.target.checked }))}
+            className="rounded border-zinc-700 bg-zinc-900"
+          />
+          Enable debug bypass auth for run endpoints
+        </label>
+        <div className="text-xs text-zinc-400 mb-2">Allowed client IP/CIDR (one per line)</div>
+        <textarea
+          value={debugWhitelistText}
+          onChange={(e) => setDebugWhitelistText(e.target.value)}
+          placeholder={"127.0.0.1/32\n192.168.1.0/24"}
+          className="w-full min-h-28 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
+        />
+        {debugAccess.updatedAt && (
+          <div className="text-xs text-zinc-500 mt-2">Last update: {new Date(debugAccess.updatedAt).toLocaleString()}</div>
+        )}
+        {debugSaveError && <div className="text-xs text-red-300 mt-2">{debugSaveError}</div>}
+        <div className="mt-3">
+          <Button onClick={handleSaveDebugAccess} disabled={debugSaveState === "saving"}>
+            {debugSaveState === "saving" ? "Saving..." : debugSaveState === "saved" ? "Saved" : "Save Debug Settings"}
+          </Button>
         </div>
       </div>
 

@@ -4,6 +4,10 @@ import { verifyApiKey, verifyServiceCredentials } from "../db.js";
 
 export const createRequireAuth = (JWT_SECRET: string, USE_MOCKS: boolean): RequestHandler => {
   return (req: Request, res: Response, next: NextFunction) => {
+    if ((req as any).user || (req as any).serviceAccount) {
+      return next();
+    }
+
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const token = authHeader.substring(7);

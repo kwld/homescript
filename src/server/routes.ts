@@ -8,6 +8,8 @@ import { registerServiceAccountRoutes } from "./routes/endpoints/service-account
 import { registerScriptCrudRoutes } from "./routes/endpoints/scripts.js";
 import { registerRunRoutes } from "./routes/endpoints/run.js";
 import { registerWebhookRoutes } from "./routes/endpoints/webhook.js";
+import { registerDocsRoutes } from "./routes/endpoints/docs.js";
+import { registerDebugAccessRoutes } from "./routes/endpoints/debug-access.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
 const IS_DEVELOPMENT = process.env.NODE_ENV !== "production";
@@ -43,7 +45,9 @@ export function setupRoutes(app: Express) {
   registerAuthRoutes(app, ctx);
   registerHaRoutes(app, ctx);
   registerServiceAccountRoutes(app, ctx);
+  registerDebugAccessRoutes(app, ctx);
   registerScriptCrudRoutes(app, ctx);
   registerRunRoutes(app, ctx);
   registerWebhookRoutes(app, ctx);
+  registerDocsRoutes(app, ctx);
 }
