@@ -6,9 +6,19 @@ import { HomeScriptEngine, HomeScriptError } from "../shared/homescript";
 import { BrowserHAConnection } from "../client/ha-connection";
 import { HAEntity, HAServices } from "../shared/ha-api";
 import { BackendRunMeta, ExecutionEvent, ExecutionReport, HAStateEvent } from "../shared/execution-report";
+import { ScriptTriggerConfig, defaultTriggerConfig, normalizeScriptTriggerConfig } from "../shared/trigger-config";
 import CommandPalette from "../components/CommandPalette";
 import ExecutionConsole from "../components/ExecutionConsole";
+import EventTriggerConfigurator from "../components/EventTriggerConfigurator";
 import { Button } from "../components/ui/Button";
+
+type DebugDataMode = "manual" | "preset" | "randomized";
+
+const DEBUG_PRESETS: Record<string, Record<string, any>> = {
+  climate: { temperature: 24, humidity: 48, illuminance: 350, motion: false },
+  night_mode: { temperature: 20, humidity: 55, illuminance: 5, motion: true },
+  energy_peak: { power: 3400, voltage: 232, current: 14.7, grid_price: 1.12 },
+};
 
 export default function ScriptEditor() {
   const { id } = useParams();
@@ -26,19 +36,27 @@ END_IF`);
   const [output, setOutput] = useState<string[]>([]);
   const [variables, setVariables] = useState<Record<string, any>>({});
   const [testParams, setTestParams] = useState('{"temperature": 26}');
+  const [debugDataMode, setDebugDataMode] = useState<DebugDataMode>("manual");
+  const [debugPreset, setDebugPreset] = useState<keyof typeof DEBUG_PRESETS>("climate");
+  const [triggerConfig, setTriggerConfig] = useState<ScriptTriggerConfig>(normalizeScriptTriggerConfig(defaultTriggerConfig));
   const [saving, setSaving] = useState(false);
+  const [savePulse, setSavePulse] = useState(false);
   
   // HA Data for Autocomplete
   const [haEntities, setHaEntities] = useState<HAEntity[]>([]);
   const [haServices, setHaServices] = useState<HAServices>({});
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showRuleBuilder, setShowRuleBuilder] = useState(false);
 
   // Debugger State
   const [breakpoints, setBreakpoints] = useState<number[]>([]);
   const [isDebugging, setIsDebugging] = useState(false);
   const [currentLine, setCurrentLine] = useState<number | null>(null);
   const debugResolver = useRef<((action: "CONTINUE" | "STEP" | "STOP") => void) | null>(null);
+  const saveHandlerRef = useRef<(() => Promise<void>) | null>(null);
   const decorationIds = useRef<string[]>([]);
+  const completionProviderRef = useRef<any>(null);
+  const homescriptLangRegisteredRef = useRef(false);
 
   const [services, setServices] = useState<any[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -71,6 +89,11 @@ END_IF`);
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
         setShowCommandPalette(true);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        void saveHandlerRef.current?.();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -149,15 +172,18 @@ END_IF`);
   }, []);
 
   useEffect(() => {
-    if (monaco && services.length > 0) {
+    if (monaco) {
       // Register HomeScript Language
-      monaco.languages.register({ id: "homescript" });
+      if (!homescriptLangRegisteredRef.current) {
+        monaco.languages.register({ id: "homescript" });
+        homescriptLangRegisteredRef.current = true;
+      }
 
       // Syntax Highlighting
       monaco.languages.setMonarchTokensProvider("homescript", {
         tokenizer: {
           root: [
-            [/\b(IF|ELSE|END_IF|WHILE|DO|END_WHILE|SET|PRINT|GET|INTO|CALL|BREAK|CONTINUE|FUNCTION|END_FUNCTION|RETURN|IMPORT)\b/, "keyword"],
+            [/\b(IF|ELSE|END_IF|WHILE|DO|END_WHILE|SET|PRINT|GET|INTO|CALL|BREAK|CONTINUE|FUNCTION|END_FUNCTION|RETURN|IMPORT|AND|OR|NOT)\b/, "keyword"],
             [/\$[a-zA-Z0-9_]+/, "variable"],
             [/[a-z_]+\.[a-z_]+/, "function"], // Highlight domain.service calls
             [/"[^"]*"/, "string"],
@@ -168,7 +194,8 @@ END_IF`);
       });
 
       // Autocomplete
-      monaco.languages.registerCompletionItemProvider("homescript", {
+      completionProviderRef.current?.dispose?.();
+      completionProviderRef.current = monaco.languages.registerCompletionItemProvider("homescript", {
         provideCompletionItems: (model, position) => {
           const word = model.getWordUntilPosition(position);
           const range = {
@@ -211,6 +238,27 @@ END_IF`);
               label: "WHILE",
               kind: monaco.languages.CompletionItemKind.Keyword,
               insertText: "WHILE ${1:condition} DO\n\t$0\nEND_WHILE",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "AND",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "AND",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "OR",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "OR",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "NOT",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "NOT",
               insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
               range,
             },
@@ -298,7 +346,15 @@ END_IF`);
              });
           }
 
-          return { suggestions };
+          const seen = new Set<string>();
+          const deduped = suggestions.filter((item) => {
+            const key = `${item.label}::${item.insertText}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+
+          return { suggestions: deduped };
         },
       });
 
@@ -322,7 +378,11 @@ END_IF`);
       // Apply Theme
       monaco.editor.setTheme("homescript-dark");
     }
-  }, [monaco, services]);
+    return () => {
+      completionProviderRef.current?.dispose?.();
+      completionProviderRef.current = null;
+    };
+  }, [monaco, services, haServices, haEntities]);
 
   useEffect(() => {
     if (id) {
@@ -337,6 +397,14 @@ END_IF`);
           setCode(data.code);
           if (data.test_params) {
             setTestParams(data.test_params);
+          }
+          if (data.trigger_config) {
+            try {
+              const parsed = JSON.parse(data.trigger_config);
+              setTriggerConfig(normalizeScriptTriggerConfig(parsed));
+            } catch {
+              setTriggerConfig(normalizeScriptTriggerConfig({}));
+            }
           }
         });
     }
@@ -378,19 +446,31 @@ END_IF`);
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`
       },
-      body: JSON.stringify({ name: finalName, endpoint: finalEndpoint, code, testParams }),
+      body: JSON.stringify({
+        name: finalName,
+        endpoint: finalEndpoint,
+        code,
+        testParams,
+        triggerConfig: JSON.stringify(triggerConfig),
+      }),
     });
 
     setSaving(false);
     if (res.ok) {
       const data = await res.json();
       setSaveError(null);
+      setSavePulse(true);
+      window.setTimeout(() => setSavePulse(false), 550);
       if (!id) navigate(`/scripts/${data.id}`);
     } else {
       const err = await res.json();
       setSaveError(err.error);
     }
   };
+
+  useEffect(() => {
+    saveHandlerRef.current = handleSave;
+  }, [handleSave]);
 
   const clearMarkers = () => {
     if (editorRef.current && monaco) {
@@ -419,6 +499,32 @@ END_IF`);
     setBackendMeta(report.meta);
   };
 
+  const generateRandomizedDebugParams = (base: Record<string, any>) => {
+    const randomized: Record<string, any> = {};
+    Object.entries(base).forEach(([key, value]) => {
+      if (typeof value === "number") {
+        const delta = Math.max(1, Math.round(Math.abs(value) * 0.25));
+        randomized[key] = Number((value + (Math.random() * 2 - 1) * delta).toFixed(2));
+      } else if (typeof value === "boolean") {
+        randomized[key] = Math.random() > 0.5;
+      } else {
+        randomized[key] = value;
+      }
+    });
+    randomized.__randomized_at = new Date().toISOString();
+    return randomized;
+  };
+
+  const parseManualParams = () => JSON.parse(testParams);
+
+  const resolveParams = (mode: DebugDataMode) => {
+    if (mode === "manual") return parseManualParams();
+    const presetData = DEBUG_PRESETS[debugPreset];
+    const payload = mode === "randomized" ? generateRandomizedDebugParams(presetData) : presetData;
+    setTestParams(JSON.stringify(payload, null, 2));
+    return payload;
+  };
+
   const handleRunServer = async () => {
     clearMarkers();
     resetExecutionConsole();
@@ -431,7 +537,7 @@ END_IF`);
     });
     let params = {};
     try {
-      params = JSON.parse(testParams);
+      params = parseManualParams();
       addEvent({
         source: "frontend",
         level: "success",
@@ -505,7 +611,7 @@ END_IF`);
     
     let params = {};
     try {
-      params = JSON.parse(testParams);
+      params = resolveParams(debugDataMode);
     } catch (e) {
       setOutput(["Error: Invalid JSON in test parameters"]);
       setIsDebugging(false);
@@ -701,7 +807,7 @@ END_IF`);
     });
     let params = {};
     try {
-      params = JSON.parse(testParams);
+      params = parseManualParams();
     } catch (e) {
       setOutput(["Error: Invalid JSON in test parameters"]);
       setFrontendMeta({ mode: "local", parseOk: false });
@@ -981,8 +1087,9 @@ END_IF`);
             onClick={handleSave}
             disabled={saving}
             title={saving ? "Saving..." : "Save"}
+            className={savePulse ? "ring-2 ring-emerald-400/60 scale-105 transition-all" : "transition-all"}
           >
-            <Save className="w-5 h-5" />
+            <Save className={`w-5 h-5 ${saving ? "animate-spin" : ""}`} />
           </Button>
           
           {isDebugging ? (
@@ -1041,43 +1148,75 @@ END_IF`);
         </div>
       </header>
 
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        <div className="flex-1 border-r-0 lg:border-r border-b lg:border-b-0 border-zinc-800 h-1/2 lg:h-auto min-h-[300px]">
-          <Editor
-            height="100%"
-            defaultLanguage="homescript"
-            theme="homescript-dark"
-            value={code}
-            onChange={(val) => setCode(val || "")}
-            onMount={(editor, monaco) => {
-              editorRef.current = editor;
-              
-              // Register Ctrl+K command
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+        <div className="flex-1 border-r-0 lg:border-r border-b lg:border-b-0 border-zinc-800 flex flex-col min-h-0 relative">
+          <div className="flex-1 min-h-0">
+            <Editor
+              height="100%"
+              defaultLanguage="homescript"
+              theme="homescript-dark"
+              value={code}
+              onChange={(val) => setCode(val || "")}
+              onMount={(editor, monaco) => {
+                editorRef.current = editor;
+                
+                // Register Ctrl+K command
               editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
                 setShowCommandPalette(true);
               });
-
-              editor.onMouseDown((e: any) => {
-                if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
-                  const lineNumber = e.target.position.lineNumber;
-                  setBreakpoints((prev) => {
-                    if (prev.includes(lineNumber)) {
-                      return prev.filter((l) => l !== lineNumber);
-                    } else {
-                      return [...prev, lineNumber];
-                    }
-                  });
-                }
+              editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+                void saveHandlerRef.current?.();
               });
-            }}
-            options={{
-              minimap: { enabled: false },
-              fontSize: 14,
-              fontFamily: "'JetBrains Mono', monospace",
-              padding: { top: 16 },
-              glyphMargin: true,
-            }}
-          />
+
+                editor.onMouseDown((e: any) => {
+                  if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+                    const lineNumber = e.target.position.lineNumber;
+                    setBreakpoints((prev) => {
+                      if (prev.includes(lineNumber)) {
+                        return prev.filter((l) => l !== lineNumber);
+                      } else {
+                        return [...prev, lineNumber];
+                      }
+                    });
+                  }
+                });
+              }}
+              options={{
+                minimap: { enabled: false },
+                fontSize: 14,
+                fontFamily: "'JetBrains Mono', monospace",
+                padding: { top: 16 },
+                glyphMargin: true,
+                scrollBeyondLastLine: false,
+              }}
+            />
+          </div>
+          {showRuleBuilder && (
+            <div className="absolute inset-x-4 top-4 bottom-14 z-20 bg-zinc-950/95 border border-zinc-800 rounded-2xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+                <h3 className="text-sm font-medium text-zinc-200">Event Builder</h3>
+                <Button size="sm" variant="ghost" onClick={() => setShowRuleBuilder(false)}>
+                  Close
+                </Button>
+              </div>
+              <div className="p-4 h-[calc(100%-53px)] overflow-y-auto">
+              <EventTriggerConfigurator
+                value={triggerConfig}
+                onChange={setTriggerConfig}
+                entities={haEntities}
+              />
+              </div>
+            </div>
+          )}
+          <div className="h-10 border-t border-zinc-800 bg-zinc-900/60 px-3 flex items-center justify-end">
+            <button
+              type="button"
+              onClick={() => setShowRuleBuilder((prev) => !prev)}
+              className="text-xs font-mono text-zinc-300 hover:text-emerald-300 transition-colors"
+            >
+              {showRuleBuilder ? "Collapse Event Builder" : "Expand Event Builder"}
+            </button>
+          </div>
           <style>{`
             .breakpoint-glyph {
               background: #ef4444;
@@ -1093,9 +1232,50 @@ END_IF`);
           `}</style>
         </div>
 
-        <div className="w-full lg:w-[34rem] bg-zinc-900 flex flex-col h-1/2 lg:h-auto border-t lg:border-t-0 border-zinc-800">
+        <div className="w-full lg:w-[34rem] bg-zinc-900 flex flex-col min-h-0 h-[50vh] lg:h-auto border-t lg:border-t-0 border-zinc-800">
           <div className="p-4 border-b border-zinc-800">
             <h3 className="text-sm font-medium text-zinc-400 mb-2 uppercase tracking-wider">Test Parameters (JSON)</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs text-zinc-400">Debug Data Mode</label>
+                <select
+                  value={debugDataMode}
+                  onChange={(e) => setDebugDataMode(e.target.value as DebugDataMode)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="manual">Manual JSON</option>
+                  <option value="preset">Predefined preset</option>
+                  <option value="randomized">Randomized preset</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs text-zinc-400">Preset</label>
+                <select
+                  value={debugPreset}
+                  onChange={(e) => setDebugPreset(e.target.value as keyof typeof DEBUG_PRESETS)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-emerald-500"
+                >
+                  {Object.keys(DEBUG_PRESETS).map((presetKey) => (
+                    <option key={presetKey} value={presetKey}>{presetKey}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-end">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    const payload =
+                      debugDataMode === "randomized"
+                        ? generateRandomizedDebugParams(DEBUG_PRESETS[debugPreset])
+                        : DEBUG_PRESETS[debugPreset];
+                    setTestParams(JSON.stringify(payload, null, 2));
+                  }}
+                >
+                  Apply Debug Values
+                </Button>
+              </div>
+            </div>
             <textarea
               value={testParams}
               onChange={(e) => setTestParams(e.target.value)}
