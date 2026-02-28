@@ -1,9 +1,29 @@
 import { Express } from "express";
 import jwt from "jsonwebtoken";
 import { RouteContext } from "../types.js";
+import { createRateLimit } from "../rate-limit.js";
+
+const getTrustedAppOrigin = (req: any): string => {
+  const appUrl = process.env.APP_URL;
+  if (appUrl) {
+    try {
+      return new URL(appUrl).origin;
+    } catch {
+      // Fall back to current host if APP_URL is malformed.
+    }
+  }
+  return `${req.protocol}://${req.get("host")}`;
+};
 
 export const registerAuthRoutes = (app: Express, ctx: RouteContext) => {
-  app.get("/api/auth/url", (req, res) => {
+  const authRouteLimit = createRateLimit({
+    maxRequests: 30,
+    windowMs: 60_000,
+    key: (req) => `${req.ip}:auth`,
+    errorMessage: "Too many authentication requests",
+  });
+
+  app.get("/api/auth/url", authRouteLimit, (req, res) => {
     const authentikBaseUrl = ctx.getAuthentikBaseUrl();
 
     if (ctx.USE_MOCKS && process.env.NODE_ENV === "development" && !authentikBaseUrl) {
@@ -30,16 +50,24 @@ export const registerAuthRoutes = (app: Express, ctx: RouteContext) => {
     res.json({ url: authUrl });
   });
 
-  app.get("/api/auth/mock-login", (_req, res) => {
+  app.get("/api/auth/mock-login", authRouteLimit, (_req, res) => {
     if (!ctx.USE_MOCKS) {
       return res.status(404).send("Mock login is disabled");
     }
+    const trustedOrigin = getTrustedAppOrigin(_req);
+    const authPayload = JSON.stringify({
+      type: "OAUTH_AUTH_SUCCESS",
+      token: "mock-admin-token",
+      user: { id: "admin", name: "Administrator" },
+    });
     res.send(`
       <html>
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: 'mock-admin-token', user: { id: "admin", name: "Administrator" } }, '*');
+              const payload = ${JSON.stringify(authPayload)};
+              const targetOrigin = ${JSON.stringify(trustedOrigin)};
+              window.opener.postMessage(JSON.parse(payload), targetOrigin);
               window.close();
             } else {
               window.location.href = '/';
@@ -51,7 +79,7 @@ export const registerAuthRoutes = (app: Express, ctx: RouteContext) => {
     `);
   });
 
-  app.get(["/api/auth/callback", "/api/auth/callback/"], async (req, res) => {
+  app.get(["/api/auth/callback", "/api/auth/callback/"], authRouteLimit, async (req, res) => {
     const { code, state } = req.query;
     if (!code) {
       return res.status(400).send("No code provided");
@@ -104,13 +132,24 @@ export const registerAuthRoutes = (app: Express, ctx: RouteContext) => {
         ctx.JWT_SECRET,
         { expiresIn: "7d" }
       );
+      const trustedOrigin = getTrustedAppOrigin(req);
+      const authPayload = JSON.stringify({
+        type: "OAUTH_AUTH_SUCCESS",
+        token,
+        user: {
+          id: String(userData.sub || ""),
+          name: String(userData.name || userData.preferred_username || ""),
+        },
+      });
 
       res.send(`
         <html>
           <body>
             <script>
               if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: '${token}', user: { id: '${userData.sub}', name: '${userData.name || userData.preferred_username}' } }, '*');
+                const payload = ${JSON.stringify(authPayload)};
+                const targetOrigin = ${JSON.stringify(trustedOrigin)};
+                window.opener.postMessage(JSON.parse(payload), targetOrigin);
                 window.close();
               } else {
                 window.location.href = '/';

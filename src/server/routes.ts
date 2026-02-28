@@ -10,7 +10,8 @@ import { registerRunRoutes } from "./routes/endpoints/run.js";
 import { registerWebhookRoutes } from "./routes/endpoints/webhook.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
-const USE_MOCKS = process.env.MOCK !== "disabled";
+const IS_DEVELOPMENT = process.env.NODE_ENV !== "production";
+const USE_MOCKS = process.env.MOCK === "enabled" && IS_DEVELOPMENT;
 
 const getAuthentikBaseUrl = () => {
   if (process.env.AUTHENTIK_URL) return process.env.AUTHENTIK_URL;
@@ -25,6 +26,10 @@ const getAuthentikBaseUrl = () => {
 };
 
 export function setupRoutes(app: Express) {
+  if (process.env.MOCK === "enabled" && !IS_DEVELOPMENT) {
+    throw new Error("MOCK=enabled is not allowed when NODE_ENV=production");
+  }
+
   const requireAuth = createRequireAuth(JWT_SECRET, USE_MOCKS);
 
   const ctx: RouteContext = {

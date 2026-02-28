@@ -16,7 +16,13 @@ async function startServer() {
   initDb();
 
   app.use(cors());
-  app.use(express.json());
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as any).rawBody = buf.toString("utf8");
+      },
+    })
+  );
   app.set("trust proxy", 1);
   app.use(
     session({

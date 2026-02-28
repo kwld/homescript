@@ -184,11 +184,17 @@ END_IF`);
         tokenizer: {
           root: [
             [/\b(IF|ELSE|END_IF|WHILE|DO|END_WHILE|SET|PRINT|GET|INTO|CALL|BREAK|CONTINUE|FUNCTION|END_FUNCTION|RETURN|IMPORT|AND|OR|NOT)\b/, "keyword"],
-            [/\$[a-zA-Z0-9_]+/, "variable"],
+            [/\$[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*/, "variable"],
             [/[a-z_]+\.[a-z_]+/, "function"], // Highlight domain.service calls
-            [/"[^"]*"/, "string"],
+            [/"/, { token: "string.quote", next: "@string" }],
             [/\d+/, "number"],
             [/#.*/, "comment"],
+          ],
+          string: [
+            [/\$[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*/, "variable"],
+            [/[^\\$"]+/, "string"],
+            [/\\./, "string.escape"],
+            [/"/, { token: "string.quote", next: "@pop" }],
           ],
         },
       });

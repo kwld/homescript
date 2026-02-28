@@ -6,83 +6,52 @@ Scope: Server auth, service-to-service API, websocket execution channel, HA inte
 
 ## Summary
 
-Overall status: **Moderate risk** (workable for controlled environments, not hardened for hostile internet exposure yet).
+Overall status: **Reduced risk** (core auth/secret/transport issues remediated; still needs schema and header hardening for hostile exposure).
 
-What is strong:
-- Service-to-service auth supports two-header credentials (`x-service-id` + `x-service-secret`).
-- JWT auth enforced for protected UI/API paths.
-- WebSocket execution channel requires explicit auth before run.
-- HA request timeout/error normalization is implemented.
-- Production dependency audit result is clean (`npm audit --omit=dev` => 0 known vulnerabilities at audit time).
+Implemented remediations:
+- Mock mode is development-only opt-in (`MOCK=enabled`) and server startup hard-fails if enabled in production.
+- Service secrets are stored hashed at rest (`scrypt` + per-secret salt), with legacy plaintext auto-migration on successful authentication.
+- OAuth popup callback/login now posts auth payload only to trusted app origin (no wildcard `*`).
+- Added in-memory rate limiting for auth routes, service-account management, script execution routes, webhook route, and websocket auth failures.
+- Webhook endpoint now enforces timestamped HMAC signature validation (`x-webhook-timestamp`, `x-webhook-signature`) and replay-window checks.
 
-Main risks to address before broad public exposure:
-- No rate limiting/brute-force protection on auth-sensitive endpoints and WS auth attempts.
-- Secrets are stored plaintext in local SQLite.
-- Webhook execution endpoint has no service credential authentication by design.
-- OAuth popup callback currently posts token to `*` (wildcard target in embedded script).
+Open hardening items:
+- Add centralized request schema validation for HTTP and websocket payloads.
+- Add explicit security headers policy (`helmet` + CSP/referrer/frameguard configuration).
 
-## Findings
+## Findings Status
 
 ### Critical
 
-None identified in current static/code audit.
+1. Mock token authentication default bypass  
+Status: **Resolved** (2026-02-28)
 
 ### High
 
 1. Plaintext service secrets in database  
-Risk: DB compromise leaks all service credentials immediately.  
-Current state: `service_accounts.api_key` stores raw secret.  
-Recommendation:
-- Store only hashed service secrets (e.g. Argon2id/bcrypt + per-secret salt).
-- Show secret once at creation; verify by hash only.
-- Add secret rotation/revocation workflow.
+Status: **Partially resolved** (hash-at-rest implemented; rotation/revocation workflow still recommended)
 
 2. Unauthenticated webhook execution endpoint  
-Risk: anyone with endpoint knowledge can trigger actions if endpoint is exposed.  
-Current state: `POST /api/webhook/:endpoint` has no auth middleware.  
-Recommendation:
-- Add optional HMAC signature validation per script.
-- Support per-webhook secret and timestamp replay protection.
-- Allow explicit disable/enable per script.
+Status: **Resolved** (required HMAC timestamp/signature validation)
 
 ### Medium
 
 1. Missing rate limiting and lockout  
-Risk: brute-force against service credentials/JWT routes/WS auth.  
-Recommendation:
-- Add IP+service-id rate limits to:
-  - `/api/service-accounts`
-  - `/api/run/:endpoint`
-  - `/api/ws/service` auth
-  - auth callback/url paths as needed.
+Status: **Resolved**
 
 2. OAuth callback postMessage wildcard target (`*`)  
-Risk: token leakage if opener context is malicious.  
-Recommendation:
-- Restrict `postMessage` target origin to trusted `APP_URL` origin.
-- Validate opener origin more strictly.
+Status: **Resolved**
 
 3. No centralized input schema validation for execute endpoints  
-Risk: malformed payloads can create unexpected execution states and harder incident diagnosis.  
-Recommendation:
-- Add request schema validation (zod/valibot) for route bodies and WS messages.
+Status: **Open**
 
 4. No formal security headers policy  
-Risk: weaker browser hardening defaults.  
-Recommendation:
-- Add `helmet` and configure CSP, frameguard, referrer-policy, etc.
+Status: **Open**
 
 ### Low
 
-1. Mock auth token available when mocks enabled  
-Risk: accidental non-dev usage with weak trust assumptions.  
-Recommendation:
-- Force explicit `NODE_ENV=development` check for all mock auth shortcuts.
-- Emit startup warning when mocks are enabled.
-
-2. Session cookie secure settings may break on non-TLS local setups  
-Recommendation:
-- Keep secure defaults, but document reverse-proxy/TLS requirements clearly.
+1. Session cookie secure settings may break on non-TLS local setups  
+Status: **Accepted risk** (document TLS/reverse-proxy requirements)
 
 ## Dependency Audit
 
@@ -97,25 +66,23 @@ Note:
 
 ## Existing Automated Security Tests
 
-Added tests:
 - `src/server/routes/middleware.test.ts`
 
-Covered cases:
+Covered behavior:
 - valid JWT accepted
 - invalid JWT rejected
 - `x-service-id` + `x-service-secret` accepted
 - legacy `x-service-key` accepted
-- mock admin token accepted only with mock mode enabled
+- service secrets are persisted hashed
+- mock token accepted only when mock mode is explicitly enabled in middleware
 - anonymous request rejected
 
-## Recommended Next Security Actions (Priority Order)
+## Recommended Next Security Actions
 
-1. Hash service secrets at rest.
-2. Add webhook signature auth and replay protection.
-3. Add rate limits for auth/run/websocket endpoints.
-4. Restrict OAuth callback postMessage target origin.
-5. Add schema validation for HTTP + WS payloads.
-6. Add `helmet` with explicit security headers policy.
+1. Add strict schema validation (zod/valibot) for all HTTP + WS payloads.
+2. Add `helmet` with explicit CSP and related headers policy.
+3. Add service secret rotation endpoint/workflow.
+4. Add metrics/alerting for auth failures and rate-limit violations.
 
 ## Verification Commands
 

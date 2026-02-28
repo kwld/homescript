@@ -1,5 +1,6 @@
 import { evaluateHomeScriptExpression } from "./homescript/expression.js";
 import { collectIfCondition, ScriptLine } from "./homescript/if-condition.js";
+import { HOME_SCRIPT_ENUMS } from "./homescript/enums.js";
 
 export class HomeScriptError extends Error {
   constructor(message: string, public line: number) {
@@ -51,7 +52,7 @@ export class HomeScriptEngine {
   private isStepping: boolean = false;
   
   constructor(options: HomeScriptOptions = {}) {
-    this.variables = { ...(options.variables || {}) };
+    this.variables = { ...(options.variables || {}), ENUMS: HOME_SCRIPT_ENUMS };
     this.onCall = options.onCall;
     this.onGet = options.onGet;
     this.onSet = options.onSet;
@@ -277,7 +278,15 @@ export class HomeScriptEngine {
     if (!match) throw new HomeScriptError("Invalid PRINT syntax. Expected: PRINT value", lineNumber);
     const expr = match[1];
     try {
-      const value = this.evaluateExpression(expr);
+      let value: any;
+      const raw = expr.trim();
+      if (/^"[\s\S]*"$/.test(raw)) {
+        // For quoted literals, support inline interpolation like "Value is $var".
+        const parsed = JSON.parse(raw);
+        value = this.interpolateTemplateString(String(parsed));
+      } else {
+        value = this.evaluateExpression(expr);
+      }
       this.output.push(String(value));
       this.emitEvent({
         type: "print",
@@ -289,6 +298,26 @@ export class HomeScriptEngine {
     } catch (e) {
       throw new HomeScriptError(`Error evaluating print: ${expr}`, lineNumber);
     }
+  }
+
+  private interpolateTemplateString(template: string) {
+    return template.replace(/\$([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)/g, (_full, path: string) => {
+      const resolved = this.resolveVariablePath(path);
+      if (resolved === undefined || resolved === null) return "";
+      return String(resolved);
+    });
+  }
+
+  private resolveVariablePath(path: string) {
+    const parts = path.split(".");
+    let current: any = this.variables;
+    for (const part of parts) {
+      if (current === null || current === undefined || typeof current !== "object") {
+        return undefined;
+      }
+      current = current[part];
+    }
+    return current;
   }
 
   private async handleImport(line: string, lineNumber: number) {

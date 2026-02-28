@@ -23,6 +23,32 @@ const wsSend = (ws: WebSocket, payload: Record<string, any>) => {
   }
 };
 
+const WS_AUTH_WINDOW_MS = 60_000;
+const WS_AUTH_MAX_FAILURES_PER_IP = 20;
+const wsAuthAttempts = new Map<string, { count: number; resetAt: number }>();
+
+const registerWsAuthFailure = (ip: string) => {
+  const now = Date.now();
+  const existing = wsAuthAttempts.get(ip);
+  if (!existing || existing.resetAt <= now) {
+    wsAuthAttempts.set(ip, { count: 1, resetAt: now + WS_AUTH_WINDOW_MS });
+    return 1;
+  }
+  existing.count += 1;
+  return existing.count;
+};
+
+const isWsIpRateLimited = (ip: string) => {
+  const now = Date.now();
+  const existing = wsAuthAttempts.get(ip);
+  if (!existing) return false;
+  if (existing.resetAt <= now) {
+    wsAuthAttempts.delete(ip);
+    return false;
+  }
+  return existing.count >= WS_AUTH_MAX_FAILURES_PER_IP;
+};
+
 const runScriptOverWs = async (
   endpoint: string,
   variables: Record<string, any>,
@@ -246,7 +272,8 @@ export const setupServiceWebSocket = (httpServer: HttpServer) => {
     path: "/api/ws/service",
   });
 
-  wsServer.on("connection", (ws) => {
+  wsServer.on("connection", (ws, req) => {
+    const clientIp = req.socket.remoteAddress || "unknown";
     const state: WsClientState = {
       authenticated: false,
       busy: false,
@@ -277,6 +304,12 @@ export const setupServiceWebSocket = (httpServer: HttpServer) => {
       }
 
       if (message.type === "auth") {
+        if (isWsIpRateLimited(clientIp)) {
+          wsSend(ws, { type: "auth_error", error: "Too many failed auth attempts. Try again later." });
+          ws.close(1013, "Rate limit exceeded");
+          return;
+        }
+
         const serviceId = message.serviceId;
         const serviceSecret = message.serviceSecret;
         const apiKey = message.apiKey;
@@ -289,6 +322,7 @@ export const setupServiceWebSocket = (httpServer: HttpServer) => {
         }
 
         if (!account) {
+          registerWsAuthFailure(clientIp);
           wsSend(ws, { type: "auth_error", error: "Invalid service credentials" });
           ws.close(1008, "Invalid credentials");
           return;

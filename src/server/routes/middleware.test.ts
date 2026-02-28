@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import jwt from "jsonwebtoken";
 import { randomUUID } from "crypto";
 import { createRequireAuth } from "./middleware.js";
-import { createServiceAccount, deleteServiceAccount, initDb } from "../db.js";
+import { createServiceAccount, db, deleteServiceAccount, initDb } from "../db.js";
 
 type ReqLike = {
   headers: Record<string, string | undefined>;
@@ -100,6 +100,17 @@ describe("createRequireAuth security behavior", () => {
     expect(nextCalled).toBe(true);
     expect(req.serviceAccount).toBeDefined();
     expect(req.serviceAccount.id).toBe(id);
+  });
+
+  it("stores service secrets hashed (not plaintext)", () => {
+    const id = randomUUID();
+    const secret = `sk_${randomUUID().replace(/-/g, "")}`;
+    createServiceAccount(id, "svc-hash", secret);
+    createdServiceIds.push(id);
+
+    const row = db.prepare("SELECT api_key FROM service_accounts WHERE id = ?").get(id) as { api_key: string };
+    expect(row.api_key).not.toBe(secret);
+    expect(row.api_key.startsWith("scrypt$")).toBe(true);
   });
 
   it("allows legacy x-service-key credentials", () => {

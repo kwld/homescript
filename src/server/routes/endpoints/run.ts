@@ -4,9 +4,18 @@ import { RouteContext } from "../types.js";
 import { getScriptByEndpoint } from "../../db.js";
 import { HomeScriptEngine, HomeScriptTraceEvent } from "../../../shared/homescript.js";
 import { ExecutionEvent, ExecutionReport, HAStateEvent } from "../../../shared/execution-report.js";
+import { createRateLimit } from "../rate-limit.js";
 
 export const registerRunRoutes = (app: Express, ctx: RouteContext) => {
-  app.post("/api/run/:endpoint", ctx.requireAuth, async (req, res) => {
+  const runRateLimit = createRateLimit({
+    maxRequests: 60,
+    windowMs: 60_000,
+    key: (req) =>
+      `${req.ip}:run:${(req as any).serviceAccount?.id || (req as any).user?.id || "anon"}:${req.params.endpoint}`,
+    errorMessage: "Too many execution requests",
+  });
+
+  app.post("/api/run/:endpoint", ctx.requireAuth, runRateLimit, async (req, res) => {
     const script = getScriptByEndpoint(req.params.endpoint);
     if (!script) return res.status(404).json({ error: "Endpoint not found" });
 

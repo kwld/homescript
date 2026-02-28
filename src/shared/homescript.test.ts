@@ -8,6 +8,12 @@ describe("HomeScriptEngine", () => {
     expect(result.output).toEqual(["Hello World"]);
   });
 
+  it("should interpolate variables inside quoted PRINT strings", async () => {
+    const engine = new HomeScriptEngine({ variables: { state: "off" } });
+    const result = await engine.execute('PRINT "AC IS $state"');
+    expect(result.output).toEqual(["AC IS off"]);
+  });
+
   it("should execute SET and use variables", async () => {
     const engine = new HomeScriptEngine();
     const result = await engine.execute(`
@@ -79,6 +85,17 @@ describe("HomeScriptEngine", () => {
     `);
     expect(result.variables.temp).toBe(22);
     expect(result.output).toEqual(["22"]);
+  });
+
+  it("should expose built-in $ENUMS values", async () => {
+    const onSetCalls: Array<{ entityId: string; state: any }> = [];
+    const engine = new HomeScriptEngine({
+      onSet: async (entityId, state) => {
+        onSetCalls.push({ entityId, state });
+      },
+    });
+    await engine.execute(`SET light.test = $ENUMS.state.off`);
+    expect(onSetCalls).toEqual([{ entityId: "light.test", state: "off" }]);
   });
 
   it("should throw error on invalid syntax", async () => {

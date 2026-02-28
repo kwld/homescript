@@ -109,17 +109,17 @@ export default function CommandPalette({ isOpen, onClose, entities, services, on
                   key={entity.entity_id}
                   variant="ghost"
                   onClick={() => handleEntitySelect(entity)}
-                  className={`w-full flex items-center justify-between px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors text-left ${isUnavailable ? 'opacity-50' : ''}`}
+                  className={`w-full !justify-start !text-left px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors ${isUnavailable ? 'opacity-50' : ''}`}
                 >
                   <div className="flex items-center gap-3">
                     <Box className={`w-4 h-4 ${isUnavailable ? 'text-zinc-600' : 'text-zinc-500 group-hover:text-emerald-400'}`} />
                     <div className="text-left">
                       <div className={`font-medium ${isUnavailable ? 'text-zinc-500' : 'text-zinc-200'}`}>{entity.attributes.friendly_name || entity.entity_id}</div>
                       <div className="text-zinc-500 text-xs font-mono">{entity.entity_id}</div>
+                      <div className={`text-zinc-500 text-xs mt-0.5 ${isUnavailable ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                        {entity.state}
+                      </div>
                     </div>
-                  </div>
-                  <div className={`text-xs px-2 py-1 rounded ${isUnavailable ? 'text-zinc-600 bg-zinc-900 group-hover:bg-zinc-800' : 'text-zinc-500 bg-zinc-800 group-hover:bg-zinc-700'}`}>
-                    {entity.state}
                   </div>
                 </Button>
               )})}
@@ -133,7 +133,7 @@ export default function CommandPalette({ isOpen, onClose, entities, services, on
               <Button
                 variant="ghost"
                 onClick={handleGetStateSelect}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors text-left border-b border-zinc-800/50 mb-2 justify-start"
+                className="w-full !justify-start !text-left px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors border-b border-zinc-800/50 mb-2"
               >
                 <Download className="w-4 h-4 text-zinc-500 group-hover:text-emerald-400" />
                 <div className="text-left">
@@ -144,7 +144,7 @@ export default function CommandPalette({ isOpen, onClose, entities, services, on
               <Button
                 variant="ghost"
                 onClick={handleSetEntityStateSelect}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors text-left border-b border-zinc-800/50 mb-2 justify-start"
+                className="w-full !justify-start !text-left px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors border-b border-zinc-800/50 mb-2"
               >
                 <Zap className="w-4 h-4 text-zinc-500 group-hover:text-emerald-400" />
                 <div className="text-left">
@@ -155,7 +155,7 @@ export default function CommandPalette({ isOpen, onClose, entities, services, on
               <Button
                 variant="ghost"
                 onClick={handleSetEntitySelect}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors text-left border-b border-zinc-800/50 mb-2 justify-start"
+                className="w-full !justify-start !text-left px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors border-b border-zinc-800/50 mb-2"
               >
                 <Code className="w-4 h-4 text-zinc-500 group-hover:text-emerald-400" />
                 <div className="text-left">
@@ -166,7 +166,7 @@ export default function CommandPalette({ isOpen, onClose, entities, services, on
               <Button
                 variant="ghost"
                 onClick={handleCopyEntity}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors text-left border-b border-zinc-800/50 mb-2 justify-start"
+                className="w-full !justify-start !text-left px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors border-b border-zinc-800/50 mb-2"
               >
                 <Copy className="w-4 h-4 text-zinc-500 group-hover:text-emerald-400" />
                 <div className="text-left">
@@ -184,7 +184,7 @@ export default function CommandPalette({ isOpen, onClose, entities, services, on
                     key={serviceName}
                     variant="ghost"
                     onClick={() => handleServiceSelect(serviceName)}
-                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors text-left justify-start"
+                    className="w-full !justify-start !text-left px-4 py-3 hover:bg-zinc-800 rounded-lg group transition-colors"
                   >
                     <Zap className="w-4 h-4 text-zinc-500 group-hover:text-yellow-400" />
                     <div className="text-left">

@@ -19,6 +19,46 @@ This file is the mandatory execution tracker for all agent work in this reposito
 - [ ] (empty)
 
 ## Done
+- [x] Add built-in HomeScript enums and fix PRINT interpolation/highlighting for variables in strings.
+  - Date: 2026-02-28
+  - Files: `src/shared/homescript/enums.ts`, `src/shared/homescript.ts`, `src/shared/homescript.test.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added `$ENUMS` built-ins (from separate enums file), enabled `PRINT "text $var"` interpolation, and updated Monaco tokenization so variables (including dotted paths) are highlighted inside strings.
+- [x] Merge media timeline display/control into a single live-updating scrubber.
+  - Date: 2026-02-28
+  - Files: `src/components/MediaPlayerController.tsx`, `TODO.md`
+  - Outcome: Replaced split progress+seek UI with one integrated timeline slider that shows progress and sends live throttled seek updates while dragging, with final seek on release.
+- [x] Add timeline time control for media playback position.
+  - Date: 2026-02-28
+  - Files: `src/components/MediaPlayerController.tsx`, `TODO.md`
+  - Outcome: Added draggable now-playing timeline scrubber with seek-on-release and explicit seek action, synced with current playback position and duration.
+- [x] Make entity details fully responsive and add mobile left-slide drawer with close control.
+  - Date: 2026-02-28
+  - Files: `src/pages/Entities.tsx`, `src/components/MediaPlayerController.tsx`, `TODO.md`
+  - Outcome: Fixed small-screen control overlap with grid-based button layout and added a mobile entity-details drawer that slides in from the left with backdrop and explicit close button.
+- [x] Add media now-playing metadata panel with cover image and live progress.
+  - Date: 2026-02-28
+  - Files: `src/components/MediaPlayerController.tsx`, `TODO.md`
+  - Outcome: Added currently playing card (title/artist/album/app), artwork rendering with HA URL/local proxy fallback, and real-time playback progress based on `media_position` + `media_position_updated_at`.
+- [x] Unify media controller button sizes and fix Queue Mode action layout overflow.
+  - Date: 2026-02-28
+  - Files: `src/components/MediaPlayerController.tsx`, `TODO.md`
+  - Outcome: Normalized button dimensions across media controls and switched Queue Mode apply actions to a responsive grid so Shuffle/Repeat buttons fit the container.
+- [x] Fix media controller volume slider resetting while dragging.
+  - Date: 2026-02-28
+  - Files: `src/components/MediaPlayerController.tsx`, `TODO.md`
+  - Outcome: Removed unstable effect dependencies so local media control state syncs only on real entity updates (`last_updated`) instead of every render.
+- [x] Implement dedicated media controller module for `media_player` speaker entities.
+  - Date: 2026-02-28
+  - Files: `src/components/MediaPlayerController.tsx`, `src/components/EntityDetailsPanel.tsx`, `TODO.md`
+  - Outcome: Added full in-panel media controls for transport, volume/mute, seek, source/sound mode, repeat/shuffle, play/search/browse media, and grouping, wired to Home Assistant service availability.
+- [x] Make `Entities & Devices` cards clickable and add detailed inline entity control/info panel.
+  - Date: 2026-02-28
+  - Files: `src/pages/Entities.tsx`, `src/components/EntityDetailsPanel.tsx`, `TODO.md`
+  - Outcome: Added click-to-select entity cards, persistent details panel with state/attributes metadata, quick power + light controls, and dynamic service form generated from Home Assistant service metadata.
+- [x] Remediate security audit findings in auth, credentials, webhook, and transport throttling paths.
+  - Date: 2026-02-28
+  - Files: `server.ts`, `src/server/routes.ts`, `src/server/db.ts`, `src/server/ws-service.ts`, `src/server/routes/rate-limit.ts`, `src/server/routes/endpoints/auth.ts`, `src/server/routes/endpoints/run.ts`, `src/server/routes/endpoints/service-accounts.ts`, `src/server/routes/endpoints/webhook.ts`, `src/server/routes/middleware.test.ts`, `TODO.md`
+  - Outcome: Enforced dev-only opt-in mocks, added startup guard for production mock mode, restricted OAuth popup messaging to trusted origin, hashed service secrets with legacy auto-migration, added HTTP/WS rate limits, and secured webhook execution with signed timestamped HMAC requests.
 - [x] Create strict `AGENTS.md` rules and set up mandatory `TODO.md` workflow.
   - Date: 2026-02-28
   - Files: `AGENTS.md`, `TODO.md`

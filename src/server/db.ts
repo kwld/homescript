@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
+import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
 
 const dbPath = path.resolve(process.cwd(), "data", "homeassistant.db");
 
@@ -10,6 +11,8 @@ if (!fs.existsSync(path.dirname(dbPath))) {
 }
 
 export const db = new Database(dbPath);
+const SECRET_HASH_PREFIX = "scrypt";
+const SECRET_HASH_LENGTH = 64;
 
 export function initDb() {
   db.exec(`
@@ -49,8 +52,9 @@ export function getServiceAccounts() {
 }
 
 export function createServiceAccount(id: string, name: string, apiKey: string) {
+  const hashedApiKey = hashServiceSecret(apiKey);
   const stmt = db.prepare("INSERT INTO service_accounts (id, name, api_key) VALUES (?, ?, ?)");
-  stmt.run(id, name, apiKey);
+  stmt.run(id, name, hashedApiKey);
 }
 
 export function deleteServiceAccount(id: string) {
@@ -59,13 +63,28 @@ export function deleteServiceAccount(id: string) {
 }
 
 export function verifyApiKey(apiKey: string) {
-  const stmt = db.prepare("SELECT id, name FROM service_accounts WHERE api_key = ?");
-  return stmt.get(apiKey);
+  const rows = db.prepare("SELECT id, name, api_key FROM service_accounts").all() as Array<{
+    id: string;
+    name: string;
+    api_key: string;
+  }>;
+  for (const row of rows) {
+    if (verifyStoredSecret(row.api_key, apiKey)) {
+      maybeMigrateSecret(row.id, row.api_key, apiKey);
+      return { id: row.id, name: row.name };
+    }
+  }
+  return undefined;
 }
 
 export function verifyServiceCredentials(id: string, secret: string) {
-  const stmt = db.prepare("SELECT id, name FROM service_accounts WHERE id = ? AND api_key = ?");
-  return stmt.get(id, secret);
+  const row = db.prepare("SELECT id, name, api_key FROM service_accounts WHERE id = ?").get(id) as
+    | { id: string; name: string; api_key: string }
+    | undefined;
+  if (!row) return undefined;
+  if (!verifyStoredSecret(row.api_key, secret)) return undefined;
+  maybeMigrateSecret(row.id, row.api_key, secret);
+  return { id: row.id, name: row.name };
 }
 
 export function getScripts() {
@@ -112,3 +131,40 @@ export function deleteScript(id: string) {
 export function getScriptsWithTriggerConfigs() {
   return db.prepare("SELECT id, name, endpoint, code, trigger_config FROM scripts").all();
 }
+
+const hashServiceSecret = (secret: string) => {
+  const salt = randomBytes(16);
+  const hash = scryptSync(secret, salt, SECRET_HASH_LENGTH);
+  return `${SECRET_HASH_PREFIX}$${salt.toString("hex")}$${hash.toString("hex")}`;
+};
+
+const isHashedSecret = (value: string) => value.startsWith(`${SECRET_HASH_PREFIX}$`);
+
+const verifyStoredSecret = (storedValue: string, providedValue: string) => {
+  if (isHashedSecret(storedValue)) {
+    try {
+      const parts = storedValue.split("$");
+      if (parts.length !== 3) return false;
+      const saltHex = parts[1];
+      const hashHex = parts[2];
+      const salt = Buffer.from(saltHex, "hex");
+      const expectedHash = Buffer.from(hashHex, "hex");
+      if (salt.length === 0 || expectedHash.length === 0) return false;
+      const actualHash = scryptSync(providedValue, salt, expectedHash.length);
+      return timingSafeEqual(expectedHash, actualHash);
+    } catch {
+      return false;
+    }
+  }
+
+  const storedBuffer = Buffer.from(storedValue);
+  const providedBuffer = Buffer.from(providedValue);
+  if (storedBuffer.length !== providedBuffer.length) return false;
+  return timingSafeEqual(storedBuffer, providedBuffer);
+};
+
+const maybeMigrateSecret = (id: string, storedValue: string, providedValue: string) => {
+  if (isHashedSecret(storedValue)) return;
+  const newHash = hashServiceSecret(providedValue);
+  db.prepare("UPDATE service_accounts SET api_key = ? WHERE id = ?").run(newHash, id);
+};

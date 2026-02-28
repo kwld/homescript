@@ -1,12 +1,91 @@
 import { Express } from "express";
+import { createHmac, timingSafeEqual } from "crypto";
 import { RouteContext } from "../types.js";
 import { getScriptByEndpoint } from "../../db.js";
 import { HomeScriptEngine } from "../../../shared/homescript.js";
+import { createRateLimit } from "../rate-limit.js";
+
+const WEBHOOK_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
+
+const getWebhookSecret = (triggerConfigRaw: unknown): string | null => {
+  if (typeof triggerConfigRaw === "string") {
+    try {
+      const parsed = JSON.parse(triggerConfigRaw);
+      if (parsed && typeof parsed.webhookSecret === "string" && parsed.webhookSecret.trim()) {
+        return parsed.webhookSecret.trim();
+      }
+    } catch {
+      // ignore invalid trigger config JSON and use env fallback
+    }
+  }
+
+  const envSecret = process.env.WEBHOOK_SIGNING_SECRET;
+  if (envSecret && envSecret.trim()) {
+    return envSecret.trim();
+  }
+  return null;
+};
+
+const isValidHex = (value: string) => /^[0-9a-fA-F]+$/.test(value);
+
+const verifyWebhookSignature = (req: any, secret: string): string | null => {
+  const timestampHeader = req.headers["x-webhook-timestamp"];
+  const signatureHeader = req.headers["x-webhook-signature"];
+
+  if (typeof timestampHeader !== "string" || typeof signatureHeader !== "string") {
+    return "Missing webhook signature headers";
+  }
+
+  const timestampMs = Number(timestampHeader);
+  if (!Number.isFinite(timestampMs)) {
+    return "Invalid webhook timestamp";
+  }
+
+  const now = Date.now();
+  if (Math.abs(now - timestampMs) > WEBHOOK_TIMESTAMP_TOLERANCE_MS) {
+    return "Webhook timestamp outside allowed window";
+  }
+
+  const rawBody = typeof req.rawBody === "string" ? req.rawBody : JSON.stringify(req.body || {});
+  const expectedHex = createHmac("sha256", secret).update(`${timestampHeader}.${rawBody}`).digest("hex");
+  const providedHex = signatureHeader.startsWith("sha256=")
+    ? signatureHeader.substring("sha256=".length)
+    : signatureHeader;
+
+  if (!isValidHex(providedHex)) {
+    return "Invalid signature format";
+  }
+
+  const expected = Buffer.from(expectedHex, "hex");
+  const provided = Buffer.from(providedHex, "hex");
+  if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) {
+    return "Invalid webhook signature";
+  }
+
+  return null;
+};
 
 export const registerWebhookRoutes = (app: Express, _ctx: RouteContext) => {
-  app.post("/api/webhook/:endpoint", async (req, res) => {
+  const webhookRateLimit = createRateLimit({
+    maxRequests: 120,
+    windowMs: 60_000,
+    key: (req) => `${req.ip}:webhook:${req.params.endpoint}`,
+    errorMessage: "Too many webhook requests",
+  });
+
+  app.post("/api/webhook/:endpoint", webhookRateLimit, async (req, res) => {
     const script = getScriptByEndpoint(req.params.endpoint);
     if (!script) return res.status(404).json({ error: "Endpoint not found" });
+
+    const secret = getWebhookSecret((script as any).trigger_config);
+    if (!secret) {
+      return res.status(401).json({ error: "Webhook secret is not configured for this endpoint" });
+    }
+
+    const verificationError = verifyWebhookSignature(req, secret);
+    if (verificationError) {
+      return res.status(401).json({ error: verificationError });
+    }
 
     const variables = {
       ...req.query,
