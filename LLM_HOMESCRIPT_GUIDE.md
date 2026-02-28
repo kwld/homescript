@@ -213,3 +213,89 @@ curl -X POST "https://your-host/api/run/office-cooling" \
   -d '{"temperature": 28, "room":"office"}'
 ```
 
+## 13. WebSocket Service-to-Service Protocol
+
+Use WebSocket when you need streamed execution events and incremental status.
+
+Endpoint:
+- `ws://<host>/api/ws/service`
+
+### Step 1: Wait for readiness
+
+Server will send:
+
+```json
+{"type":"ready","message":"Authenticate using {\"type\":\"auth\",...}"}
+```
+
+### Step 2: Authenticate
+
+Preferred:
+
+```json
+{"type":"auth","serviceId":"<service_account_id>","serviceSecret":"<service_account_secret>"}
+```
+
+Legacy:
+
+```json
+{"type":"auth","apiKey":"<legacy_key>"}
+```
+
+On success:
+
+```json
+{"type":"auth_ok","serviceId":"...","serviceName":"..."}
+```
+
+### Step 3: Execute script
+
+```json
+{"type":"run","endpoint":"office-cooling","variables":{"temperature":28},"requestId":"req-1"}
+```
+
+### Step 4: Handle streamed events
+
+You can receive:
+- `run_started`
+- `run_event`
+- `ha_state`
+- `run_complete`
+
+Example completion:
+
+```json
+{
+  "type": "run_complete",
+  "requestId": "req-1",
+  "endpoint": "office-cooling",
+  "success": true,
+  "output": ["Cooling applied"],
+  "variables": {"temperature": 28, "target": 22},
+  "durationMs": 152
+}
+```
+
+### Keepalive
+
+Client:
+
+```json
+{"type":"ping","requestId":"p1"}
+```
+
+Server:
+
+```json
+{"type":"pong","requestId":"p1"}
+```
+
+### LLM Rule For WS
+
+When generating WebSocket integration code, force this sequence:
+1. connect
+2. wait for `ready`
+3. send `auth`
+4. wait for `auth_ok`
+5. send `run`
+6. collect events until `run_complete`

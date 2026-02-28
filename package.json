@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:prod": "npm run build && npm run build:server",
+    "start": "node dist-server/server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
