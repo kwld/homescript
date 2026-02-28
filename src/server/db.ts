@@ -26,12 +26,19 @@ export function initDb() {
       code TEXT NOT NULL,
       endpoint TEXT NOT NULL UNIQUE,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      test_params TEXT DEFAULT '{}'
+      test_params TEXT DEFAULT '{}',
+      trigger_config TEXT DEFAULT '{}'
     );
   `);
 
   try {
     db.exec("ALTER TABLE scripts ADD COLUMN test_params TEXT DEFAULT '{}'");
+  } catch (e) {
+    // Column already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE scripts ADD COLUMN trigger_config TEXT DEFAULT '{}'");
   } catch (e) {
     // Column already exists
   }
@@ -62,7 +69,7 @@ export function verifyServiceCredentials(id: string, secret: string) {
 }
 
 export function getScripts() {
-  return db.prepare("SELECT id, name, endpoint, created_at FROM scripts").all();
+  return db.prepare("SELECT id, name, endpoint, created_at, trigger_config FROM scripts").all();
 }
 
 export function getScriptById(id: string) {
@@ -73,17 +80,35 @@ export function getScriptByEndpoint(endpoint: string) {
   return db.prepare("SELECT * FROM scripts WHERE endpoint = ?").get(endpoint);
 }
 
-export function createScript(id: string, name: string, code: string, endpoint: string, testParams: string = '{}') {
-  const stmt = db.prepare("INSERT INTO scripts (id, name, code, endpoint, test_params) VALUES (?, ?, ?, ?, ?)");
-  stmt.run(id, name, code, endpoint, testParams);
+export function createScript(
+  id: string,
+  name: string,
+  code: string,
+  endpoint: string,
+  testParams: string = '{}',
+  triggerConfig: string = '{}'
+) {
+  const stmt = db.prepare("INSERT INTO scripts (id, name, code, endpoint, test_params, trigger_config) VALUES (?, ?, ?, ?, ?, ?)");
+  stmt.run(id, name, code, endpoint, testParams, triggerConfig);
 }
 
-export function updateScript(id: string, name: string, code: string, endpoint: string, testParams: string = '{}') {
-  const stmt = db.prepare("UPDATE scripts SET name = ?, code = ?, endpoint = ?, test_params = ? WHERE id = ?");
-  stmt.run(name, code, endpoint, testParams, id);
+export function updateScript(
+  id: string,
+  name: string,
+  code: string,
+  endpoint: string,
+  testParams: string = '{}',
+  triggerConfig: string = '{}'
+) {
+  const stmt = db.prepare("UPDATE scripts SET name = ?, code = ?, endpoint = ?, test_params = ?, trigger_config = ? WHERE id = ?");
+  stmt.run(name, code, endpoint, testParams, triggerConfig, id);
 }
 
 export function deleteScript(id: string) {
   const stmt = db.prepare("DELETE FROM scripts WHERE id = ?");
   stmt.run(id);
+}
+
+export function getScriptsWithTriggerConfigs() {
+  return db.prepare("SELECT id, name, endpoint, code, trigger_config FROM scripts").all();
 }
