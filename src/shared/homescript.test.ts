@@ -31,6 +31,18 @@ describe("HomeScriptEngine", () => {
     expect(result.output).toEqual(["Greater"]);
   });
 
+  it("should handle multiline IF conditions with HomeScript operators", async () => {
+    const engine = new HomeScriptEngine();
+    const result = await engine.execute(`
+      IF 1=1 AND
+         1=1 OR
+         false
+        PRINT "Multiline works"
+      END_IF
+    `);
+    expect(result.output).toEqual(["Multiline works"]);
+  });
+
   it("should handle WHILE loops", async () => {
     const engine = new HomeScriptEngine();
     const result = await engine.execute(`
