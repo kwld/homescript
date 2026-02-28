@@ -91,3 +91,67 @@ This file is the mandatory execution tracker for all agent work in this reposito
   - Date: 2026-02-28
   - Files: `README.md`, `TODO.md`
   - Outcome: Replaced README with a complete project guide covering architecture, auth, API usage, WebSocket protocol, production build, Docker, and quality commands.
+- [x] Create a security audit document and add automated security tests.
+  - Date: 2026-02-28
+  - Files: `SECURITY_AUDIT.md`, `src/server/routes/middleware.test.ts`, `TODO.md`
+  - Outcome: Added formal security audit with prioritized findings and introduced security-focused middleware tests validating JWT/service credential authorization paths.
+- [x] Implement HA state-change trigger watcher with Script Editor trigger configuration and graph-based threshold levels.
+  - Date: 2026-02-28
+  - Files: `src/shared/trigger-config.ts`, `src/server/db.ts`, `src/server/ha-event-engine.ts`, `server.ts`, `src/server/routes/endpoints/scripts.ts`, `src/components/EventTriggerConfigurator.tsx`, `src/pages/ScriptEditor.tsx`, `package.json`, `package-lock.json`, `TODO.md`
+  - Outcome: Added configurable per-script event triggers (toggle/any-change/sensor levels), draggable graph threshold UI, persisted trigger config, and HA websocket watcher that injects `$event.name` and `$event.value` during auto-execution.
+- [x] Populate trigger graph with real Home Assistant historical data.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/ha.ts`, `src/pages/ScriptEditor.tsx`, `src/components/EventTriggerConfigurator.tsx`, `TODO.md`
+  - Outcome: Added authenticated HA history API proxy and wired Script Editor sensor trigger graph to render real recent history with inline loading/error status.
+- [x] Fix history graph JSON parsing error when API returns HTML fallback.
+  - Date: 2026-02-28
+  - Files: `server.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added `/api/*` JSON 404 fallback and robust history response parsing to prevent `Unexpected token '<'` and surface actionable inline errors.
+- [x] Add tests for history response parsing failures and validate HA history payload shape from runtime call.
+  - Date: 2026-02-28
+  - Files: `src/shared/history.ts`, `src/shared/history.test.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added parser unit tests (valid JSON, HTML fallback, invalid format) and confirmed live HA `/api/history/period` returns JSON series shape compatible with graph mapping.
+- [x] Harden history parser for empty/nonstandard successful responses and raw HA array payloads.
+  - Date: 2026-02-28
+  - Files: `src/shared/history.ts`, `src/shared/history.test.ts`, `TODO.md`
+  - Outcome: Added tolerant parsing for empty 2xx bodies and raw HA history shape so graph loads instead of failing with invalid response errors.
+- [x] Fix trigger graph readability and align draggable level behavior with real historical value scale.
+  - Date: 2026-02-28
+  - Files: `src/components/EventTriggerConfigurator.tsx`, `TODO.md`
+  - Outcome: Applied high-contrast tooltip styling, chart-domain auto-fit to historical values, and drag-edge behavior that expands range up/down with below-chart drop-to-remove threshold.
+- [x] Smooth drag edge-expansion and normalize min/max range on drop.
+  - Date: 2026-02-28
+  - Files: `src/components/EventTriggerConfigurator.tsx`, `TODO.md`
+  - Outcome: Replaced jumpy edge growth with throttled small expansion steps during drag and auto-adjusted range to true data+level bounds when drag ends.
+- [x] Add logarithmic preview option and fix cursor/handle misalignment during edge-extension drag.
+  - Date: 2026-02-28
+  - Files: `src/components/EventTriggerConfigurator.tsx`, `src/shared/trigger-config.ts`, `src/server/ha-event-engine.ts`, `TODO.md`
+  - Outcome: Added selectable linear/log preview scale (with safe fallback), and updated edge-extension drag logic to map handle value from cursor position after each range update to keep drag alignment stable.
+- [x] Replace single trigger toggle with multi-rule builder and AND/OR logic.
+  - Date: 2026-02-28
+  - Files: `src/shared/trigger-config.ts`, `src/components/EventTriggerConfigurator.tsx`, `src/pages/ScriptEditor.tsx`, `src/server/ha-event-engine.ts`, `TODO.md`
+  - Outcome: Implemented rule list builder (add/remove/enable/edit), group logic selector (AND/OR), per-rule event settings and graph levels, plus backend evaluation of enabled rules with legacy trigger-config migration support.
+- [x] Remove per-rule toggles and add Monaco rule-expression engine using rule-name variables.
+  - Date: 2026-02-28
+  - Files: `src/shared/trigger-config.ts`, `src/components/EventTriggerConfigurator.tsx`, `src/server/ha-event-engine.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Rules now work by existence in list, added expression editor for `$RULE_NAME` with AND/OR/NOT logic, and backend now validates each rule per state-change then evaluates custom expression (or fallback group logic).
+- [x] Add rule debugger with fake event data, syntax-highlighted rule input, and expand Script Editor Monaco workspace height.
+  - Date: 2026-02-28
+  - Files: `src/components/EventTriggerConfigurator.tsx`, `src/pages/ScriptEditor.tsx`, `src/shared/trigger-config.ts`, `TODO.md`
+  - Outcome: Added local rule debugger (fake entity/old/new state evaluation), switched rule-expression Monaco to HomeScript highlighting, introduced debug data modes (manual/preset/randomized), and constrained top config panel so the main HomeScript editor keeps ~80vh workspace.
+- [x] Style global scrollbars and move rule builder into a dropdown below script editor.
+  - Date: 2026-02-28
+  - Files: `src/index.css`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added app-wide custom scrollbar theming and refactored Script Editor layout to remove top split panel, placing trigger/rule configuration in a collapsible dropdown below Monaco.
+- [x] Add toggle transition `From`/`To` rule matching and hide sensor-only controls for non-sensor rules.
+  - Date: 2026-02-28
+  - Files: `src/shared/trigger-config.ts`, `src/components/EventTriggerConfigurator.tsx`, `src/server/ha-event-engine.ts`, `TODO.md`
+  - Outcome: Added per-toggle transition filters (`any/on/off` -> `any/on/off`) in UI and backend evaluator, and removed irrelevant Preview Scale/Range controls from toggle and any-change rule types.
+- [x] Implement popup entity selector with filters, current state preview, and mini history graph.
+  - Date: 2026-02-28
+  - Files: `src/components/EntitySelectorPopup.tsx`, `src/components/EventTriggerConfigurator.tsx`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added reusable entity picker popup with search/domain/historic filters, selected entity state details, and historical sparkline preview when available; integrated into rule `Entity` field.
+- [x] Add multiline HomeScript IF condition parsing and reuse shared parser for event IF wrapper evaluation.
+  - Date: 2026-02-28
+  - Files: `src/shared/homescript.ts`, `src/shared/homescript/expression.ts`, `src/shared/homescript/if-condition.ts`, `src/server/ha-event-engine.ts`, `src/components/EventTriggerConfigurator.tsx`, `src/shared/homescript.test.ts`, `TODO.md`
+  - Outcome: Split parser logic into reusable shared modules, enabled multiline IF condition continuation in HomeScript engine, and switched event expression validation/evaluation to the same parser path used by HomeScript execution.
