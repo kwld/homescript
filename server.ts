@@ -7,6 +7,7 @@ import { createServer as createViteServer } from "vite";
 import { setupRoutes } from "./src/server/routes.js";
 import { initDb } from "./src/server/db.js";
 import { setupServiceWebSocket } from "./src/server/ws-service.js";
+import { startHaEventEngine } from "./src/server/ha-event-engine.js";
 
 async function startServer() {
   const app = express();
@@ -33,6 +34,11 @@ async function startServer() {
 
   setupRoutes(app);
 
+  // Keep API responses JSON-only; avoid SPA HTML fallbacks for unknown API paths.
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ error: "API endpoint not found" });
+  });
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -45,6 +51,7 @@ async function startServer() {
 
   const httpServer = createHttpServer(app);
   setupServiceWebSocket(httpServer);
+  startHaEventEngine();
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
