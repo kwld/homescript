@@ -9,8 +9,16 @@ export class HomeScriptError extends Error {
   }
 }
 
+export class HomeScriptRequestError extends HomeScriptError {
+  constructor(message: string, line: number, public statusCode: number) {
+    super(message, line);
+    this.name = "HomeScriptRequestError";
+  }
+}
+
 export interface HomeScriptOptions {
   variables?: Record<string, any>;
+  queryParams?: Record<string, any>;
   onCall?: (service: string, args: any[]) => Promise<any>;
   onGet?: (entityId: string) => Promise<any>;
   onSet?: (entityId: string, state: any) => Promise<any>;
@@ -38,6 +46,7 @@ export interface HomeScriptTraceEvent {
 
 export class HomeScriptEngine {
   private variables: Record<string, any> = {};
+  private queryParams: Record<string, any> = {};
   private output: string[] = [];
   private onCall?: (service: string, args: any[]) => Promise<any>;
   private onGet?: (entityId: string) => Promise<any>;
@@ -50,9 +59,12 @@ export class HomeScriptEngine {
   private onBreakpoint?: (line: number, variables: Record<string, any>) => Promise<"CONTINUE" | "STEP" | "STOP">;
   private onEvent?: (event: HomeScriptTraceEvent) => void;
   private isStepping: boolean = false;
+  private labelMap: Map<string, number> = new Map();
+  private gotoGuard: number = 0;
   
   constructor(options: HomeScriptOptions = {}) {
     this.variables = { ...(options.variables || {}), ENUMS: HOME_SCRIPT_ENUMS };
+    this.queryParams = { ...(options.queryParams || {}) };
     this.onCall = options.onCall;
     this.onGet = options.onGet;
     this.onSet = options.onSet;
@@ -66,11 +78,13 @@ export class HomeScriptEngine {
   public async execute(code: string): Promise<{ output: string[], variables: Record<string, any> }> {
     this.emitEvent({ type: "execution_start", level: "info", message: "Execution started" });
     const lines: ScriptLine[] = code.split('\n').map((l, i) => ({ content: l.trim(), lineNumber: i + 1 }));
+    this.validateTopDeclarations(lines);
+    this.registerLabels(lines);
     
     // First pass: Register functions
     await this.registerFunctions(lines);
 
-    await this.executeBlock(lines, 0, lines.length);
+    await this.executeBlock(lines, 0, lines.length, false);
     this.emitEvent({ type: "execution_end", level: "success", message: "Execution completed" });
     return { output: this.output, variables: this.variables };
   }
@@ -120,7 +134,7 @@ export class HomeScriptEngine {
     }
   }
 
-  private async executeBlock(lines: ScriptLine[], start: number, end: number): Promise<void> {
+  private async executeBlock(lines: ScriptLine[], start: number, end: number, inLoop: boolean): Promise<void> {
     let i = start;
     while (i < end) {
       const lineObj = lines[i];
@@ -172,11 +186,20 @@ export class HomeScriptEngine {
       } else if (keyword === 'IMPORT') {
         await this.handleImport(line, lineObj.lineNumber);
         i++;
+      } else if (keyword === 'REQUIRED') {
+        this.handleRequiredOptional(line, lineObj.lineNumber, true);
+        i++;
+      } else if (keyword === 'OPTIONAL') {
+        this.handleRequiredOptional(line, lineObj.lineNumber, false);
+        i++;
       } else if (keyword === 'SET') {
         await this.handleSet(line, lineObj.lineNumber);
         i++;
       } else if (keyword === 'PRINT') {
         this.handlePrint(line, lineObj.lineNumber);
+        i++;
+      } else if (keyword === 'TEST') {
+        this.handleTest(line, lineObj.lineNumber);
         i++;
       } else if (keyword === 'GET') {
         await this.handleGet(line, lineObj.lineNumber);
@@ -185,13 +208,23 @@ export class HomeScriptEngine {
         await this.handleCall(line, lineObj.lineNumber, lines);
         i++;
       } else if (keyword === 'IF') {
-        i = await this.handleIf(lines, i, end);
+        i = await this.handleIf(lines, i, end, inLoop);
       } else if (keyword === 'WHILE') {
         i = await this.handleWhile(lines, i, end);
       } else if (keyword === 'BREAK') {
-        throw new HomeScriptError("BREAK outside of loop", lineObj.lineNumber);
+        const hardBreak = this.parseHardBreak(line, lineObj.lineNumber);
+        if (hardBreak) {
+          throw new HomeScriptRequestError(hardBreak.message, lineObj.lineNumber, hardBreak.statusCode);
+        }
+        if (!inLoop) {
+          throw new HomeScriptError("BREAK without code is only allowed inside WHILE loop", lineObj.lineNumber);
+        }
+        throw new Error("__LOOP_BREAK__");
       } else if (keyword === 'CONTINUE') {
-        throw new HomeScriptError("CONTINUE outside of loop", lineObj.lineNumber);
+        if (!inLoop) {
+          throw new HomeScriptError("CONTINUE outside of loop", lineObj.lineNumber);
+        }
+        throw new Error("__LOOP_CONTINUE__");
       } else if (keyword === 'RETURN') {
         this.emitEvent({
           type: "return",
@@ -200,6 +233,10 @@ export class HomeScriptEngine {
           message: "Function returned",
         });
         return; // Exit current block (function)
+      } else if (keyword === 'LABEL') {
+        i++;
+      } else if (keyword === 'GOTO') {
+        i = this.handleGoto(line, lineObj.lineNumber, i, end);
       } else if (keyword === 'ELSE' || keyword === 'END_IF' || keyword === 'END_WHILE' || keyword === 'END_FUNCTION') {
          // These should be handled by their respective block handlers
          i++;
@@ -271,6 +308,228 @@ export class HomeScriptEngine {
     } else {
       throw new HomeScriptError("Invalid SET syntax. Expected: SET $var = value OR SET domain.entity = value", lineNumber);
     }
+  }
+
+  private handleRequiredOptional(line: string, lineNumber: number, required: boolean) {
+    const parsed = this.parseRequiredOptionalDeclaration(line, required);
+    if (!parsed) {
+      throw new HomeScriptError(
+        required
+          ? "Invalid REQUIRED syntax. Expected: REQUIRED $name [IF (...)]"
+          : "Invalid OPTIONAL syntax. Expected: OPTIONAL $name [= default] [IF (...)]",
+        lineNumber,
+      );
+    }
+    const { varName, defaultExpr, validatorExpr } = parsed;
+    const queryValue = this.queryParams[varName];
+    const missing = queryValue === undefined || queryValue === null || queryValue === "";
+
+    if (required && missing) {
+      throw new HomeScriptRequestError(`Missing required query variable: ${varName}`, lineNumber, 422);
+    }
+
+    if (!required && missing) {
+      if (defaultExpr) {
+        this.variables[varName] = this.evaluateExpression(defaultExpr);
+      } else {
+        this.variables[varName] = null;
+      }
+    } else {
+      this.variables[varName] = queryValue;
+    }
+
+    if (validatorExpr) {
+      let valid = false;
+      try {
+        valid = Boolean(this.evaluateExpression(validatorExpr));
+      } catch (e: any) {
+        throw new HomeScriptRequestError(`Validation expression error for ${varName}: ${e.message}`, lineNumber, 422);
+      }
+      if (!valid) {
+        throw new HomeScriptRequestError(`Validation failed for ${varName}`, lineNumber, 422);
+      }
+    }
+
+    this.emitEvent({
+      type: required ? "required_inject" : "optional_inject",
+      level: missing ? "warning" : "success",
+      line: lineNumber,
+      message: `${required ? "REQUIRED" : "OPTIONAL"} injected $${varName}`,
+      details: { value: this.variables[varName], validator: validatorExpr || null },
+    });
+  }
+
+  private parseRequiredOptionalDeclaration(
+    line: string,
+    required: boolean,
+  ): { varName: string; defaultExpr: string | null; validatorExpr: string | null } | null {
+    const keyword = required ? "REQUIRED" : "OPTIONAL";
+    if (!line.startsWith(`${keyword} `)) return null;
+    let rest = line.slice(keyword.length).trim();
+    const varMatch = rest.match(/^\$([a-zA-Z0-9_]+)/);
+    if (!varMatch) return null;
+    const varName = varMatch[1];
+    rest = rest.slice(varMatch[0].length).trim();
+
+    let validatorExpr: string | null = null;
+    const validatorMatch = rest.match(/(?:^|\s)IF\s*\(([\s\S]+)\)\s*$/);
+    if (validatorMatch) {
+      validatorExpr = validatorMatch[1].trim();
+      rest = rest.slice(0, validatorMatch.index ?? 0).trim();
+    } else if (/\bIF\s*\(/.test(rest)) {
+      return null;
+    }
+
+    let defaultExpr: string | null = null;
+    if (rest.startsWith("=")) {
+      if (required) return null;
+      defaultExpr = rest.slice(1).trim();
+      if (!defaultExpr) return null;
+    } else if (rest.length > 0) {
+      return null;
+    }
+
+    return { varName, defaultExpr, validatorExpr };
+  }
+
+  private parseHardBreak(line: string, lineNumber: number): { statusCode: number; message: string } | null {
+    const match = line.match(/^BREAK\s+(\d{3})(?:\s+(.+))?$/);
+    if (!match) return null;
+    const statusCode = Number(match[1]);
+    if (statusCode < 100 || statusCode > 599) {
+      throw new HomeScriptError("BREAK status code must be between 100 and 599", lineNumber);
+    }
+    let message = `Execution stopped by BREAK ${statusCode}`;
+    if (match[2]) {
+      const msgExpr = match[2].trim();
+      if (/^"[\s\S]*"$/.test(msgExpr)) {
+        message = this.interpolateTemplateString(JSON.parse(msgExpr));
+      } else {
+        message = String(this.evaluateExpression(msgExpr));
+      }
+    }
+    return { statusCode, message };
+  }
+
+  private handleTest(line: string, lineNumber: number) {
+    const parsed = this.parseTestStatement(line);
+    if (!parsed) {
+      throw new HomeScriptError(
+        "Invalid TEST syntax. Use: TEST <valueExpr> /regex/flags [INTO $var] or TEST /regex/flags <valueExpr> [INTO $var]",
+        lineNumber,
+      );
+    }
+    const { valueExpr, regexLiteral, resultVarName } = parsed;
+    const pattern = this.parseRegexLiteral(regexLiteral, lineNumber);
+    let value: any;
+    try {
+      value = this.evaluateExpression(valueExpr);
+    } catch {
+      throw new HomeScriptError(`Error evaluating TEST value: ${valueExpr}`, lineNumber);
+    }
+    const result = pattern.test(String(value ?? ""));
+    this.variables[resultVarName || "TEST"] = result;
+    this.emitEvent({
+      type: "test_regex",
+      level: result ? "success" : "warning",
+      line: lineNumber,
+      message: `TEST ${result ? "matched" : "did not match"}`,
+      details: { regex: regexLiteral, value, into: resultVarName || "TEST", result },
+    });
+  }
+
+  private parseTestStatement(
+    line: string,
+  ): { valueExpr: string; regexLiteral: string; resultVarName: string | null } | null {
+    const header = line.match(/^TEST\s+(.+)$/);
+    if (!header) return null;
+    let remainder = header[1].trim();
+    let resultVarName: string | null = null;
+
+    const intoMatch = remainder.match(/\s+INTO\s+\$([a-zA-Z0-9_]+)\s*$/);
+    if (intoMatch) {
+      resultVarName = intoMatch[1];
+      remainder = remainder.slice(0, intoMatch.index ?? remainder.length).trim();
+    }
+
+    const regexLiterals = this.extractRegexLiterals(remainder);
+    if (regexLiterals.length !== 1) return null;
+    const regexLiteral = regexLiterals[0];
+    const valueExpr = remainder.replace(regexLiteral, "").trim();
+    if (!valueExpr) return null;
+    return { valueExpr, regexLiteral, resultVarName };
+  }
+
+  private extractRegexLiterals(input: string): string[] {
+    const out: string[] = [];
+    let i = 0;
+    while (i < input.length) {
+      if (input[i] !== "/") {
+        i += 1;
+        continue;
+      }
+      let j = i + 1;
+      let inClass = false;
+      let escaped = false;
+      while (j < input.length) {
+        const ch = input[j];
+        if (escaped) {
+          escaped = false;
+          j += 1;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          j += 1;
+          continue;
+        }
+        if (ch === "[" && !inClass) {
+          inClass = true;
+          j += 1;
+          continue;
+        }
+        if (ch === "]" && inClass) {
+          inClass = false;
+          j += 1;
+          continue;
+        }
+        if (ch === "/" && !inClass) break;
+        j += 1;
+      }
+      if (j >= input.length || input[j] !== "/") {
+        i += 1;
+        continue;
+      }
+      let k = j + 1;
+      while (k < input.length && /[dgimsuvy]/.test(input[k])) k += 1;
+      out.push(input.slice(i, k));
+      i = k;
+    }
+    return out;
+  }
+
+  private parseRegexLiteral(literal: string, lineNumber: number): RegExp {
+    const match = literal.match(/^\/([\s\S]*)\/([dgimsuvy]*)$/);
+    if (!match) {
+      throw new HomeScriptError("Invalid regex literal. Use /pattern/flags", lineNumber);
+    }
+    try {
+      return new RegExp(match[1], match[2]);
+    } catch (e: any) {
+      throw new HomeScriptError(`Invalid regex: ${e.message}`, lineNumber);
+    }
+  }
+
+  private handleGoto(line: string, lineNumber: number, currentIndex: number, blockEnd: number): number {
+    const match = line.match(/^GOTO\s+([a-zA-Z_][a-zA-Z0-9_]*)$/);
+    if (!match) throw new HomeScriptError("Invalid GOTO syntax. Expected: GOTO labelName", lineNumber);
+    const label = match[1];
+    const target = this.labelMap.get(label);
+    if (target === undefined) throw new HomeScriptError(`Unknown label: ${label}`, lineNumber);
+    if (target >= blockEnd) throw new HomeScriptError(`GOTO target '${label}' is outside current block`, lineNumber);
+    this.gotoGuard += 1;
+    if (this.gotoGuard > 5000) throw new HomeScriptError("Too many GOTO jumps (possible infinite loop)", lineNumber);
+    return target + 1;
   }
 
   private handlePrint(line: string, lineNumber: number) {
@@ -358,6 +617,33 @@ export class HomeScriptEngine {
         });
         throw new HomeScriptError(`Failed to import '${scriptName}': ${e.message}`, lineNumber);
     }
+  }
+
+  private validateTopDeclarations(lines: ScriptLine[]) {
+    let declarationZoneActive = true;
+    for (const lineObj of lines) {
+      const line = lineObj.content;
+      if (!line || line.startsWith("#")) continue;
+      const isDeclaration = line.startsWith("REQUIRED ") || line.startsWith("OPTIONAL ");
+      if (declarationZoneActive) {
+        if (!isDeclaration) declarationZoneActive = false;
+      } else if (isDeclaration) {
+        throw new HomeScriptError("REQUIRED/OPTIONAL declarations must be at the top of script", lineObj.lineNumber);
+      }
+    }
+  }
+
+  private registerLabels(lines: ScriptLine[]) {
+    this.labelMap.clear();
+    lines.forEach((lineObj, index) => {
+      const match = lineObj.content.match(/^LABEL\s+([a-zA-Z_][a-zA-Z0-9_]*)$/);
+      if (!match) return;
+      const label = match[1];
+      if (this.labelMap.has(label)) {
+        throw new HomeScriptError(`Duplicate label: ${label}`, lineObj.lineNumber);
+      }
+      this.labelMap.set(label, index);
+    });
   }
 
   private async handleGet(line: string, lineNumber: number) {
@@ -468,7 +754,7 @@ export class HomeScriptEngine {
       });
 
       try {
-          await this.executeBlock(lines, func.startLine + 1, func.endLine);
+          await this.executeBlock(lines, func.startLine + 1, func.endLine, false);
       } finally {
           // Restore variables
           func.args.forEach((argName) => {
@@ -482,7 +768,7 @@ export class HomeScriptEngine {
       }
   }
 
-  private async handleIf(lines: ScriptLine[], startIndex: number, maxEnd: number): Promise<number> {
+  private async handleIf(lines: ScriptLine[], startIndex: number, maxEnd: number, inLoop: boolean): Promise<number> {
     const lineObj = lines[startIndex];
     let parsedCondition;
     try {
@@ -599,7 +885,7 @@ export class HomeScriptEngine {
           line: lines[branch.startLine].lineNumber,
           message: `Executing ${branch.type} branch`,
         });
-        await this.executeBlock(lines, branch.startLine + 1, branch.endLine);
+        await this.executeBlock(lines, branch.startLine + 1, branch.endLine, inLoop);
         break; // Only execute one branch
       }
     }
@@ -652,10 +938,10 @@ export class HomeScriptEngine {
         if (iterations++ > 1000) throw new HomeScriptError("Infinite loop detected (max 1000 iterations)", lineObj.lineNumber);
       
         try {
-            await this.executeBlock(lines, startIndex + 1, endIndex);
+            await this.executeBlock(lines, startIndex + 1, endIndex, true);
         } catch (e: any) {
-            if (e.message.includes('BREAK')) break;
-            if (e.message.includes('CONTINUE')) continue;
+            if (e?.message === "__LOOP_BREAK__") break;
+            if (e?.message === "__LOOP_CONTINUE__") continue;
             throw e;
         }
     }

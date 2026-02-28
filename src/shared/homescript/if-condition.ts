@@ -23,7 +23,24 @@ export const collectIfCondition = (
       continue;
     }
     const kw = next.split(/\s+/)[0];
-    if (kw === "ELSE" || kw === "END_IF" || kw === "FUNCTION" || kw === "WHILE" || kw === "CALL" || kw === "GET" || kw === "SET" || kw === "PRINT" || kw === "RETURN") {
+    if (
+      kw === "ELSE" ||
+      kw === "END_IF" ||
+      kw === "FUNCTION" ||
+      kw === "WHILE" ||
+      kw === "CALL" ||
+      kw === "GET" ||
+      kw === "SET" ||
+      kw === "PRINT" ||
+      kw === "RETURN" ||
+      kw === "REQUIRED" ||
+      kw === "OPTIONAL" ||
+      kw === "GOTO" ||
+      kw === "LABEL" ||
+      kw === "BREAK" ||
+      kw === "CONTINUE" ||
+      kw === "TEST"
+    ) {
       break;
     }
     if (!shouldContinueIfCondition(condition, next)) {
@@ -38,4 +55,3 @@ export const collectIfCondition = (
     lastConditionLineIndex: idx,
   };
 };
-
