@@ -13,12 +13,52 @@ This file is the mandatory execution tracker for all agent work in this reposito
    - One-line outcome summary
 
 ## Planned
-- [ ] (empty)
+- [ ]Add in /scripts/id an prompt generator fully featured and modern prompt.
+    It MUST:
+    - Create `copy-ready` prompt for user.
+    - option to select entities from ha itself and include their values to set/get so ai knows what has access to.
+    - VERY detailed instructions for maximum context usage.
+    - DETAILED instructions of getting and setting 
+    - Have full description of HomeScript code and its name.
+    - Extra input to append users message.
+    - Have multiple modes: CREATE, UPDATE, OPTIMIZE, API
+      - CREATE: Doesn't include current code.
+      - UPDATE: Includes current code in the prompt and message about it.
+      - OPTIMIZE: similar to above but with generated message to optimize.
+      - API: Completly different message about this specific command API endpoint.
 
 ## In Progress
 - [ ] (empty)
 
 ## Done
+- [x] Add service-header auth schemes to Swagger and refresh docs revision on script save/update/delete.
+  - Date: 2026-02-28
+  - Files: `src/server/openapi-revision.ts`, `src/server/openapi.ts`, `src/server/routes/endpoints/scripts.ts`, `src/server/routes/endpoints/docs.ts`, `TODO.md`
+  - Outcome: Swagger now exposes Bearer + `x-service-id`/`x-service-secret` + `x-service-key` auth options, and script Swagger JSON updates immediately after script create/update/delete via revision bump with no-cache headers.
+- [x] Add dual HomeScript execution endpoints per script (`GET` + `POST`) and reflect in script Swagger docs.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/run.ts`, `src/server/openapi.ts`, `TODO.md`
+  - Outcome: Added `GET /api/run/:endpoint` (variables from query params) and `POST /api/run/:endpoint` (variables from JSON body), while keeping REQUIRED/OPTIONAL query injection logic and updating script-generated Swagger to show both methods.
+- [x] Switch Swagger to script-definition docs in menu and move server docs to separate backend-only endpoint.
+  - Date: 2026-02-28
+  - Files: `src/server/openapi.ts`, `src/server/routes/endpoints/docs.ts`, `src/pages/SwaggerDocs.tsx`, `src/App.tsx`, `TODO.md`
+  - Outcome: HomeScripts API Swagger now generated strictly from current scripts (including REQUIRED/OPTIONAL query params parsed from script code), rendered in-app iframe with server-side auth injection; server-wide Swagger moved to separate `/api/docs/server` endpoint not linked in menu.
+- [x] Render Swagger UI in-app iframe with server-side auth token injection.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/docs.ts`, `src/pages/SwaggerDocs.tsx`, `src/App.tsx`, `TODO.md`
+  - Outcome: Added authenticated docs frame endpoint that injects bearer token into Swagger requests server-side and new `/swagger` app page rendering Swagger UI in iframe.
+- [x] Add Swagger UI API docs + HomeScript keyword/runtime/lint upgrades (`REQUIRED/OPTIONAL/GOTO/LABEL`).
+  - Date: 2026-02-28
+  - Files: `src/server/openapi.ts`, `src/server/routes/endpoints/docs.ts`, `src/server/routes.ts`, `src/server/routes/endpoints/run.ts`, `src/App.tsx`, `src/shared/homescript.ts`, `src/shared/homescript/validation.ts`, `src/shared/homescript/if-condition.ts`, `src/shared/homescript.test.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added authenticated real Swagger UI with dynamically generated OpenAPI docs (including script endpoints), implemented REQUIRED/OPTIONAL query injection with 422 fail-fast behavior, added LABEL/GOTO execution, introduced live Monaco syntax diagnostics/underlines, and added dedicated editor coloring/autocomplete for new keywords and labels.
+- [x] Expand HomeScript automated tests to cover core language/runtime features comprehensively.
+  - Date: 2026-02-28
+  - Files: `src/shared/homescript.test.ts`, `TODO.md`
+  - Outcome: Added broad engine tests for PRINT/SET/GET/CALL, IF/ELSE IF/multiline logic, WHILE/BREAK/CONTINUE/infinite-loop guard, FUNCTION/RETURN/arg validation, IMPORT behavior, debugger breakpoints, enums, and syntax/block error paths.
+- [x] Add auto-generated debug inputs, Monaco JSON parameter editors, and mock device-state runtime for script runs.
+  - Date: 2026-02-28
+  - Files: `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added script analysis to auto-build parameters and entity mock states, switched Test Parameters to Monaco JSON editor, added Mock Device States JSON section, and made local/debug/server run paths auto-fallback to generated inputs when manual JSON is invalid.
 - [x] Add built-in HomeScript enums and fix PRINT interpolation/highlighting for variables in strings.
   - Date: 2026-02-28
   - Files: `src/shared/homescript/enums.ts`, `src/shared/homescript.ts`, `src/shared/homescript.test.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
@@ -195,3 +235,43 @@ This file is the mandatory execution tracker for all agent work in this reposito
   - Date: 2026-02-28
   - Files: `src/shared/homescript.ts`, `src/shared/homescript/expression.ts`, `src/shared/homescript/if-condition.ts`, `src/server/ha-event-engine.ts`, `src/components/EventTriggerConfigurator.tsx`, `src/shared/homescript.test.ts`, `TODO.md`
   - Outcome: Split parser logic into reusable shared modules, enabled multiline IF condition continuation in HomeScript engine, and switched event expression validation/evaluation to the same parser path used by HomeScript execution.
+- [x] Add HomeScript array membership improvements (`IN`) and regex `TEST` keyword with editor highlighting.
+  - Date: 2026-02-28
+  - Files: `src/shared/homescript.ts`, `src/shared/homescript/expression.ts`, `src/shared/homescript/if-condition.ts`, `src/shared/homescript/validation.ts`, `src/shared/homescript.test.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added robust `IN` membership checks for arrays/strings/objects (including nested `$path.to.value` references), introduced `TEST` statement with flexible operand order and optional `INTO $var` assignment, and updated Monaco keyword/regex styling so `/regex/flags` literals render in red.
+- [x] Expand test coverage for new HomeScript `IN` and `TEST` features.
+  - Date: 2026-02-28
+  - Files: `src/shared/homescript.test.ts`, `src/shared/homescript.validation.test.ts`, `TODO.md`
+  - Outcome: Added runtime tests for `IN` (arrays, nested paths, object keys) and `TEST` (both operand orders, default result var, escaped/class regex, invalid syntax/regex), plus editor-lint diagnostics tests for `TEST` validation.
+- [x] Improve debug mode UX with dedicated panel and line-by-line playback controls.
+  - Date: 2026-02-28
+  - Files: `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Changed Debug action to open a dedicated menu, added auto/manual debug run modes with configurable line delay and executed-line highlighting, plus selectable missing-parameter simulation for REQUIRED/OPTIONAL testing.
+- [x] Add secure debug bypass mode for `/api/run/*` with admin whitelist controls and red-alert UI state.
+  - Date: 2026-02-28
+  - Files: `src/server/db.ts`, `src/server/ip-whitelist.ts`, `src/server/routes/run-debug-access.ts`, `src/server/routes/endpoints/debug-access.ts`, `src/server/routes/endpoints/run.ts`, `src/server/routes/middleware.ts`, `src/server/routes.ts`, `src/shared/execution-report.ts`, `src/pages/ServiceAccounts.tsx`, `src/pages/ScriptEditor.tsx`, `src/App.tsx`, `src/server/ip-whitelist.test.ts`, `src/server/routes/run-debug-access.test.ts`, `TODO.md`
+  - Outcome: Added admin-managed debug bypass config (enabled flag + IP/CIDR whitelist), run-endpoint auth bypass path requiring `x-debug-bypass` + registered `x-service-id` + whitelisted client IP, global red warning mode in UI when enabled, and debug-mode toggle in Script Editor for Monaco breakpoints and debug controls.
+- [x] Add live debug draft syncing/execution with separate persisted `debug_code`.
+  - Date: 2026-02-28
+  - Files: `src/server/db.ts`, `src/server/routes/endpoints/scripts.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added `scripts.debug_code` storage and debug draft update endpoint, enabled Debug-mode auto-sync of editor code to `debug_code` and automatic local execution without Save, while keeping Save action bound to non-debug main script code.
+- [x] Remove `x-debug-bypass` header dependency for LAN/mobile debug bypass flow.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/run-debug-access.ts`, `src/server/routes/run-debug-access.test.ts`, `src/pages/ServiceAccounts.tsx`, `src/App.tsx`, `TODO.md`
+  - Outcome: Debug bypass now auto-applies when enabled and request has valid `x-service-id` from whitelisted IP/CIDR, without requiring extra bypass header; updated UI/security messaging and middleware tests accordingly.
+- [x] Add login-page Debug tab for quick endpoint testing when debug mode is enabled.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/debug-access.ts`, `src/App.tsx`, `TODO.md`
+  - Outcome: Added public whitelist-guarded endpoint discovery for debug mode and a new login Debug tab that lists run endpoints, prebuilds JSON inputs from `REQUIRED/OPTIONAL` declarations, accepts `x-service-id`, and executes selected endpoints directly.
+- [x] Make login Debug tab service-id optional and improve mobile-first endpoint testing UX.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/debug-access.ts`, `src/App.tsx`, `TODO.md`
+  - Outcome: Added dedicated public debug runner endpoint with mocked service/HA behaviors (no service ID required), added endpoint filtering and card selection, generated form inputs for REQUIRED/OPTIONAL fields, optional mock-state editor, and improved small-screen debug layout.
+- [x] Align remote debug execution with Start Debug Run semantics (breakpoints + line replay).
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/debug-access.ts`, `src/App.tsx`, `TODO.md`
+  - Outcome: Public debug run now executes in debug mode with configurable breakpoints and per-line delay, returns execution trace, and login Debug tab replays highlighted lines with breakpoint markers to mirror Start Debug Run behavior from remote devices.
+- [x] Move remote execution replay from login Debug tab to Script Editor debug view.
+  - Date: 2026-02-28
+  - Files: `src/server/routes/endpoints/debug-access.ts`, `src/pages/ScriptEditor.tsx`, `src/App.tsx`, `TODO.md`
+  - Outcome: Added live debug session feed endpoint for authenticated UI and Script Editor polling/replay (line highlighting + breakpoint markers) when debug mode is enabled, while login Debug tab remains a remote run launcher without replay playback.
