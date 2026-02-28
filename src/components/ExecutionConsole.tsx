@@ -122,6 +122,10 @@ export default function ExecutionConsole({
             <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider mb-2">Variables</h3>
             <pre className="text-xs text-zinc-300 overflow-x-auto">{JSON.stringify(variables, null, 2)}</pre>
           </div>
+          <div>
+            <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider mb-2">Run Command (JSON)</h3>
+            <pre className="text-xs text-zinc-300 overflow-x-auto">{JSON.stringify(frontendMeta?.runCommand ?? null, null, 2)}</pre>
+          </div>
         </div>
       )}
 

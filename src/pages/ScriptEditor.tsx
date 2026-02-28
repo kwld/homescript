@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { Save, Play, ArrowLeft, Laptop, Bug, StopCircle, ArrowRight, Webhook, AlertCircle } from "lucide-react";
 import { HomeScriptEngine, HomeScriptError } from "../shared/homescript";
+import { validateHomeScript } from "../shared/homescript/validation";
 import { BrowserHAConnection } from "../client/ha-connection";
 import { HAEntity, HAServices } from "../shared/ha-api";
 import { BackendRunMeta, ExecutionEvent, ExecutionReport, HAStateEvent } from "../shared/execution-report";
@@ -12,12 +13,70 @@ import ExecutionConsole from "../components/ExecutionConsole";
 import EventTriggerConfigurator from "../components/EventTriggerConfigurator";
 import { Button } from "../components/ui/Button";
 
-type DebugDataMode = "manual" | "preset" | "randomized";
+type DebugDataMode = "auto" | "manual" | "preset" | "randomized";
+type DebugRunMode = "auto" | "manual";
 
 const DEBUG_PRESETS: Record<string, Record<string, any>> = {
   climate: { temperature: 24, humidity: 48, illuminance: 350, motion: false },
   night_mode: { temperature: 20, humidity: 55, illuminance: 5, motion: true },
   energy_peak: { power: 3400, voltage: 232, current: 14.7, grid_price: 1.12 },
+};
+
+const extractEntityIdsFromCode = (script: string, triggerConfig: ScriptTriggerConfig): string[] => {
+  const entities = new Set<string>();
+  const add = (value: string) => {
+    const v = value.trim();
+    if (v && /^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(v)) entities.add(v);
+  };
+
+  const getRegex = /GET\s+([a-zA-Z0-9_.]+)\s+INTO\s+\$[a-zA-Z0-9_]+/g;
+  const setRegex = /SET\s+([a-zA-Z0-9_.]+)\s*=/g;
+  const callStringArgRegex = /CALL\s+[a-zA-Z0-9_.]+\(\s*"([a-zA-Z0-9_.]+)"/g;
+  const callEntityPayloadRegex = /entity_id"\s*:\s*"([a-zA-Z0-9_.]+)"/g;
+
+  let m: RegExpExecArray | null = null;
+  while ((m = getRegex.exec(script)) !== null) add(m[1]);
+  while ((m = setRegex.exec(script)) !== null) add(m[1]);
+  while ((m = callStringArgRegex.exec(script)) !== null) add(m[1]);
+  while ((m = callEntityPayloadRegex.exec(script)) !== null) add(m[1]);
+
+  (triggerConfig.rules || []).forEach((r) => add(r.entityId || ""));
+  return Array.from(entities).sort();
+};
+
+const inferDefaultParamValue = (name: string): any => {
+  const lower = name.toLowerCase();
+  if (lower.includes("temp") || lower.includes("humidity") || lower.includes("pressure") || lower.includes("power") || lower.includes("voltage") || lower.includes("current") || lower.includes("illuminance") || lower.includes("level") || lower.includes("count")) return 25;
+  if (lower.startsWith("is_") || lower.startsWith("has_") || lower.includes("enabled") || lower.includes("motion") || lower.includes("occupied")) return false;
+  if (lower.includes("time")) return "12:00";
+  if (lower.includes("date")) return "2026-02-28";
+  return "value";
+};
+
+const buildAutoParamsFromCode = (script: string): Record<string, any> => {
+  const vars = new Set<string>();
+  const setAssigned = new Set<string>();
+  const getAssigned = new Set<string>();
+
+  const varRegex = /\$([a-zA-Z0-9_]+)/g;
+  const setVarRegex = /SET\s+\$([a-zA-Z0-9_]+)\s*=/g;
+  const getIntoRegex = /GET\s+[a-zA-Z0-9_.]+\s+INTO\s+\$([a-zA-Z0-9_]+)/g;
+
+  let m: RegExpExecArray | null = null;
+  while ((m = varRegex.exec(script)) !== null) vars.add(m[1]);
+  while ((m = setVarRegex.exec(script)) !== null) setAssigned.add(m[1]);
+  while ((m = getIntoRegex.exec(script)) !== null) getAssigned.add(m[1]);
+
+  const out: Record<string, any> = {};
+  Array.from(vars)
+    .filter((name) => name !== "ENUMS")
+    .filter((name) => !setAssigned.has(name))
+    .filter((name) => !getAssigned.has(name))
+    .sort()
+    .forEach((name) => {
+      out[name] = inferDefaultParamValue(name);
+    });
+  return out;
 };
 
 export default function ScriptEditor() {
@@ -33,10 +92,19 @@ export default function ScriptEditor() {
 ELSE
   PRINT "Temperature is fine"
 END_IF`);
+  const [mainCode, setMainCode] = useState(`IF $temperature > 25
+  CALL homeassistant.turn_on("switch.ac")
+  PRINT "AC turned on"
+ELSE
+  PRINT "Temperature is fine"
+END_IF`);
+  const [storedDebugCode, setStoredDebugCode] = useState<string | null>(null);
+  const [debugLiveSyncStatus, setDebugLiveSyncStatus] = useState<"idle" | "syncing" | "synced" | "error">("idle");
   const [output, setOutput] = useState<string[]>([]);
   const [variables, setVariables] = useState<Record<string, any>>({});
   const [testParams, setTestParams] = useState('{"temperature": 26}');
-  const [debugDataMode, setDebugDataMode] = useState<DebugDataMode>("manual");
+  const [mockDeviceStatesJson, setMockDeviceStatesJson] = useState("{}");
+  const [debugDataMode, setDebugDataMode] = useState<DebugDataMode>("auto");
   const [debugPreset, setDebugPreset] = useState<keyof typeof DEBUG_PRESETS>("climate");
   const [triggerConfig, setTriggerConfig] = useState<ScriptTriggerConfig>(normalizeScriptTriggerConfig(defaultTriggerConfig));
   const [saving, setSaving] = useState(false);
@@ -53,10 +121,23 @@ END_IF`);
   const [isDebugging, setIsDebugging] = useState(false);
   const [currentLine, setCurrentLine] = useState<number | null>(null);
   const debugResolver = useRef<((action: "CONTINUE" | "STEP" | "STOP") => void) | null>(null);
+  const debugStopRequestedRef = useRef(false);
+  const [showDebugMenu, setShowDebugMenu] = useState(false);
+  const [debugToolsEnabled, setDebugToolsEnabled] = useState(false);
+  const debugToolsEnabledRef = useRef(false);
+  const [debugRunMode, setDebugRunMode] = useState<DebugRunMode>("manual");
+  const [debugLineDelayMs, setDebugLineDelayMs] = useState(180);
+  const [debugHighlightLines, setDebugHighlightLines] = useState(false);
+  const [debugMissingParams, setDebugMissingParams] = useState<string[]>([]);
+  const [debugPromotePulse, setDebugPromotePulse] = useState(false);
   const saveHandlerRef = useRef<(() => Promise<void>) | null>(null);
   const decorationIds = useRef<string[]>([]);
   const completionProviderRef = useRef<any>(null);
   const homescriptLangRegisteredRef = useRef(false);
+  const remoteReplayTimerRef = useRef<number | null>(null);
+  const lastRemoteSessionIdRef = useRef<string | null>(null);
+  const debugDraftSyncTimerRef = useRef<number | null>(null);
+  const debugEnabledAtRef = useRef<number | null>(null);
 
   const [services, setServices] = useState<any[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -64,6 +145,22 @@ END_IF`);
   const [haStateEvents, setHaStateEvents] = useState<HAStateEvent[]>([]);
   const [backendMeta, setBackendMeta] = useState<BackendRunMeta | null>(null);
   const [frontendMeta, setFrontendMeta] = useState<Record<string, any> | null>(null);
+  const [debugInputError, setDebugInputError] = useState<string | null>(null);
+
+  useEffect(() => {
+    debugToolsEnabledRef.current = debugToolsEnabled;
+  }, [debugToolsEnabled]);
+
+  useEffect(() => {
+    if (id) return;
+    const saved = localStorage.getItem("script_editor_debug_tools_enabled_new");
+    setDebugToolsEnabled(saved === "true");
+  }, [id]);
+
+  useEffect(() => {
+    if (id) return;
+    localStorage.setItem("script_editor_debug_tools_enabled_new", debugToolsEnabled ? "true" : "false");
+  }, [id, debugToolsEnabled]);
 
   const addEvent = (event: Omit<ExecutionEvent, "id" | "timestamp">) => {
     setExecutionEvents((prev) => [
@@ -81,6 +178,136 @@ END_IF`);
     setHaStateEvents([]);
     setBackendMeta(null);
     setFrontendMeta(null);
+  };
+
+  const applyRemoteDebugReplay = (payload: any, createdAt: string) => {
+    const traceEvents = Array.isArray(payload?.traceEvents) ? payload.traceEvents : [];
+    const mappedEvents: ExecutionEvent[] = traceEvents.map((ev: any, idx: number) => ({
+      id: `remote-${Date.now()}-${idx}`,
+      timestamp: createdAt || new Date().toISOString(),
+      source: "engine",
+      level:
+        ev?.level === "error"
+          ? "error"
+          : ev?.level === "success"
+            ? "success"
+            : ev?.level === "warning"
+              ? "warning"
+              : "info",
+      message: String(ev?.message || ev?.type || "trace"),
+      line: Number.isInteger(ev?.line) ? ev.line : undefined,
+    }));
+
+    setExecutionEvents(mappedEvents);
+    setHaStateEvents([]);
+    setBackendMeta(null);
+    setFrontendMeta({
+      mode: "remote_debug_replay",
+      source: payload?.source || "unknown",
+      receivedAt: new Date().toISOString(),
+      sessionCreatedAt: createdAt,
+      breakpoints: payload?.breakpoints || [],
+      runCommand: {
+        mode: "remote_debug_replay",
+        endpoint: endpoint || "test",
+        source: payload?.source || "unknown",
+        lineDelayMs: payload?.lineDelayMs,
+        requestedBreakpoints: payload?.requestedBreakpoints || [],
+        effectiveBreakpoints: payload?.breakpoints || [],
+        serviceCalls: payload?.serviceCalls || [],
+        mockStates: payload?.mockStates || {},
+        debugToolsEnabled,
+      },
+    });
+    setOutput(Array.isArray(payload?.output) ? payload.output.map((x: any) => String(x)) : payload?.error ? [`Error: ${payload.error}`] : []);
+    setVariables(payload?.variables && typeof payload.variables === "object" ? payload.variables : {});
+
+    const lines = traceEvents
+      .filter((ev: any) => ev?.type === "line_execute" && Number.isInteger(ev?.line))
+      .map((ev: any) => Number(ev.line));
+    // Keep only user-defined editor breakpoints. Remote replay should not overwrite them.
+    setCurrentLine(null);
+
+    if (remoteReplayTimerRef.current) {
+      window.clearInterval(remoteReplayTimerRef.current);
+      remoteReplayTimerRef.current = null;
+    }
+    if (lines.length === 0) return;
+    const intervalMs = Math.max(60, Number(payload?.lineDelayMs) || 180);
+    let idx = -1;
+    remoteReplayTimerRef.current = window.setInterval(() => {
+      idx += 1;
+      setCurrentLine(lines[idx] || null);
+      if (idx >= lines.length - 1 && remoteReplayTimerRef.current) {
+        window.clearInterval(remoteReplayTimerRef.current);
+        remoteReplayTimerRef.current = null;
+      }
+    }, intervalMs);
+  };
+
+  const handleCodeChange = (nextCode: string) => {
+    setCode(nextCode);
+    if (!debugToolsEnabled) {
+      setMainCode(nextCode);
+    }
+  };
+
+  const toggleDebugTools = async () => {
+    const persistMode = async (enabled: boolean) => {
+      if (!id) return;
+      try {
+        const token = localStorage.getItem("auth_token");
+        await fetch(`/api/scripts/${id}/debug`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ debugEnabled: enabled }),
+        });
+      } catch {
+        // Best-effort mode persistence.
+      }
+    };
+
+    if (debugToolsEnabled) {
+      setDebugToolsEnabled(false);
+      setShowDebugMenu(false);
+      setBreakpoints([]);
+      setCode(mainCode);
+      setDebugLiveSyncStatus("idle");
+      lastRemoteSessionIdRef.current = null;
+      await persistMode(false);
+      if (remoteReplayTimerRef.current) {
+        window.clearInterval(remoteReplayTimerRef.current);
+        remoteReplayTimerRef.current = null;
+      }
+      return;
+    }
+
+    setMainCode(code);
+    let nextDebugCode = storedDebugCode;
+    if (id) {
+      try {
+        const token = localStorage.getItem("auth_token");
+        const res = await fetch(`/api/scripts/${id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          nextDebugCode = typeof data.debug_code === "string" ? data.debug_code : null;
+          setStoredDebugCode(nextDebugCode);
+        }
+      } catch {
+        // Best-effort refresh of latest debug draft.
+      }
+    }
+
+    setDebugToolsEnabled(true);
+    setShowDebugMenu(true);
+    debugEnabledAtRef.current = Date.now();
+    await persistMode(true);
+    setCode(nextDebugCode && nextDebugCode.trim().length > 0 ? nextDebugCode : code);
   };
 
   // Keyboard Shortcuts
@@ -183,9 +410,13 @@ END_IF`);
       monaco.languages.setMonarchTokensProvider("homescript", {
         tokenizer: {
           root: [
-            [/\b(IF|ELSE|END_IF|WHILE|DO|END_WHILE|SET|PRINT|GET|INTO|CALL|BREAK|CONTINUE|FUNCTION|END_FUNCTION|RETURN|IMPORT|AND|OR|NOT)\b/, "keyword"],
+            [/^(\s*LABEL)(\s+)([a-zA-Z_][a-zA-Z0-9_]*)/, ["keyword.flow", "", "label.name"]],
+            [/^(\s*GOTO)(\s+)([a-zA-Z_][a-zA-Z0-9_]*)/, ["keyword.flow", "", "label.name"]],
+            [/\b(REQUIRED|OPTIONAL)\b/, "keyword.decl"],
+            [/\b(IF|ELSE|END_IF|WHILE|DO|END_WHILE|SET|PRINT|GET|INTO|CALL|BREAK|CONTINUE|FUNCTION|END_FUNCTION|RETURN|IMPORT|AND|OR|NOT|GOTO|LABEL|IN|TEST)\b/, "keyword.flow"],
             [/\$[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*/, "variable"],
             [/[a-z_]+\.[a-z_]+/, "function"], // Highlight domain.service calls
+            [/\/(?:\\.|[^\/\\\n]|\[(?:\\.|[^\]\\\n])*\])+\/[dgimsuvy]*/, "regexp"],
             [/"/, { token: "string.quote", next: "@string" }],
             [/\d+/, "number"],
             [/#.*/, "comment"],
@@ -212,6 +443,55 @@ END_IF`);
           };
 
           const suggestions: any[] = [
+            {
+              label: "REQUIRED",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "REQUIRED $${1:param_name} IF (${2:condition})",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "OPTIONAL",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "OPTIONAL $${1:param_name} = ${2:default_value} IF (${3:condition})",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "LABEL",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "LABEL ${1:label_name}",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "GOTO",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "GOTO ${1:label_name}",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "BREAK",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: 'BREAK ${1:404} "${2:message}"',
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "TEST",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: 'TEST ${1:$value} /${2:pattern}/${3:i} INTO $${4:is_valid}',
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "IN",
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: "IN",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
             {
               label: "FUNCTION",
               kind: monaco.languages.CompletionItemKind.Keyword,
@@ -369,10 +649,13 @@ END_IF`);
         base: "vs-dark",
         inherit: true,
         rules: [
-          { token: "keyword", foreground: "C586C0", fontStyle: "bold" },
+          { token: "keyword.flow", foreground: "C586C0", fontStyle: "bold" },
+          { token: "keyword.decl", foreground: "4FC1FF", fontStyle: "bold" },
           { token: "variable", foreground: "9CDCFE" },
           { token: "function", foreground: "DCDCAA" }, // Function color
+          { token: "label.name", foreground: "FF8C00", fontStyle: "italic bold" },
           { token: "string", foreground: "CE9178" },
+          { token: "regexp", foreground: "FF6B6B", fontStyle: "bold" },
           { token: "number", foreground: "B5CEA8" },
           { token: "comment", foreground: "6A9955", fontStyle: "italic" },
         ],
@@ -391,6 +674,22 @@ END_IF`);
   }, [monaco, services, haServices, haEntities]);
 
   useEffect(() => {
+    if (!editorRef.current || !monaco) return;
+    const model = editorRef.current.getModel();
+    if (!model) return;
+    const diagnostics = validateHomeScript(code);
+    const markers = diagnostics.map((d) => ({
+      startLineNumber: d.line,
+      startColumn: 1,
+      endLineNumber: d.line,
+      endColumn: model.getLineContent(d.line).length + 1,
+      message: d.message,
+      severity: monaco.MarkerSeverity.Error,
+    }));
+    monaco.editor.setModelMarkers(model, "homescript-lint", markers);
+  }, [code, monaco]);
+
+  useEffect(() => {
     if (id) {
       const token = localStorage.getItem("auth_token");
       fetch(`/api/scripts/${id}`, {
@@ -400,9 +699,21 @@ END_IF`);
         .then((data) => {
           setName(data.name);
           setEndpoint(data.endpoint);
-          setCode(data.code);
+          const persistedDebugEnabled = Boolean(data.debug_enabled);
+          const incomingDebugCode = typeof data.debug_code === "string" ? data.debug_code : null;
+          const nextCode = persistedDebugEnabled && incomingDebugCode && incomingDebugCode.trim().length > 0 ? incomingDebugCode : data.code;
+          setDebugToolsEnabled(persistedDebugEnabled);
+          setShowDebugMenu(persistedDebugEnabled);
+          debugEnabledAtRef.current = persistedDebugEnabled ? Date.now() : null;
+          setCode(nextCode);
+          setMainCode(data.code);
+          setStoredDebugCode(incomingDebugCode);
           if (data.test_params) {
             setTestParams(data.test_params);
+          }
+          const savedMockStates = localStorage.getItem(`script_mock_states_${data.id || id}`);
+          if (savedMockStates) {
+            setMockDeviceStatesJson(savedMockStates);
           }
           if (data.trigger_config) {
             try {
@@ -415,6 +726,11 @@ END_IF`);
         });
     }
   }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    localStorage.setItem(`script_mock_states_${id}`, mockDeviceStatesJson);
+  }, [id, mockDeviceStatesJson]);
 
   const handleSave = async () => {
     let finalName = name.trim();
@@ -435,7 +751,8 @@ END_IF`);
       setEndpoint(finalEndpoint);
     }
 
-    if (!code.trim()) {
+    const codeToSave = debugToolsEnabled ? mainCode : code;
+    if (!codeToSave.trim()) {
       setSaveError("Script code is required");
       return;
     }
@@ -455,7 +772,7 @@ END_IF`);
       body: JSON.stringify({
         name: finalName,
         endpoint: finalEndpoint,
-        code,
+        code: codeToSave,
         testParams,
         triggerConfig: JSON.stringify(triggerConfig),
       }),
@@ -521,14 +838,104 @@ END_IF`);
     return randomized;
   };
 
-  const parseManualParams = () => JSON.parse(testParams);
+  const parseJsonObject = (raw: string, label: string) => {
+    try {
+      const parsed = JSON.parse(raw || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`${label} must be a JSON object`);
+      }
+      return parsed as Record<string, any>;
+    } catch (e: any) {
+      throw new Error(e?.message || `Invalid JSON in ${label}`);
+    }
+  };
 
-  const resolveParams = (mode: DebugDataMode) => {
-    if (mode === "manual") return parseManualParams();
-    const presetData = DEBUG_PRESETS[debugPreset];
-    const payload = mode === "randomized" ? generateRandomizedDebugParams(presetData) : presetData;
-    setTestParams(JSON.stringify(payload, null, 2));
-    return payload;
+  const buildAutoInputBundle = () => {
+    const autoParams = buildAutoParamsFromCode(code);
+    const entityIds = extractEntityIdsFromCode(code, triggerConfig);
+    const autoMockStates: Record<string, any> = {};
+    entityIds.forEach((entityId) => {
+      const found = haEntities.find((e) => e.entity_id === entityId);
+      autoMockStates[entityId] = found ? found.state : "unknown";
+    });
+    return { autoParams, autoMockStates };
+  };
+
+  const applyAutoGeneratedInputs = () => {
+    const { autoParams, autoMockStates } = buildAutoInputBundle();
+    setTestParams(JSON.stringify(autoParams, null, 2));
+    setMockDeviceStatesJson(JSON.stringify(autoMockStates, null, 2));
+    setDebugInputError(null);
+  };
+
+  const getKnownParamNames = () => {
+    const autoParamNames = Object.keys(buildAutoInputBundle().autoParams);
+    try {
+      const manual = JSON.parse(testParams || "{}");
+      if (manual && typeof manual === "object" && !Array.isArray(manual)) {
+        return Array.from(new Set([...autoParamNames, ...Object.keys(manual)])).sort();
+      }
+    } catch {
+      // Ignore invalid manual JSON; auto names are still usable.
+    }
+    return autoParamNames;
+  };
+
+  const toggleMissingParam = (name: string) => {
+    setDebugMissingParams((prev) => (prev.includes(name) ? prev.filter((p) => p !== name) : [...prev, name]));
+  };
+
+  useEffect(() => {
+    const { autoParams, autoMockStates } = buildAutoInputBundle();
+    const autoParamsJson = JSON.stringify(autoParams, null, 2);
+    const autoMockStatesJson = JSON.stringify(autoMockStates, null, 2);
+    const trimmedMock = mockDeviceStatesJson.trim();
+    const isMockEmpty = !trimmedMock || trimmedMock === "{}";
+
+    if (debugDataMode === "auto" && testParams !== autoParamsJson) {
+      setTestParams(autoParamsJson);
+    }
+    if ((debugDataMode === "auto" || isMockEmpty) && mockDeviceStatesJson !== autoMockStatesJson) {
+      setMockDeviceStatesJson(autoMockStatesJson);
+    }
+  }, [code, triggerConfig, haEntities, debugDataMode]);
+
+  const resolveRuntimeInputs = (mode: DebugDataMode, autoFallback: boolean) => {
+    const { autoParams, autoMockStates } = buildAutoInputBundle();
+    let params: Record<string, any> = {};
+    let paramsFallback = false;
+
+    try {
+      if (mode === "auto") {
+        params = autoParams;
+        setTestParams(JSON.stringify(params, null, 2));
+      } else if (mode === "manual") {
+        const manual = parseJsonObject(testParams, "test parameters");
+        params = { ...autoParams, ...manual };
+      } else {
+        const presetData = DEBUG_PRESETS[debugPreset];
+        const payload = mode === "randomized" ? generateRandomizedDebugParams(presetData) : presetData;
+        params = { ...autoParams, ...payload };
+        setTestParams(JSON.stringify(params, null, 2));
+      }
+    } catch (e) {
+      if (!autoFallback) throw e;
+      params = autoParams;
+      paramsFallback = true;
+      setTestParams(JSON.stringify(params, null, 2));
+    }
+
+    let mockStates: Record<string, any>;
+    try {
+      const manualMockStates = parseJsonObject(mockDeviceStatesJson, "mock device states");
+      mockStates = { ...autoMockStates, ...manualMockStates };
+    } catch (e) {
+      if (!autoFallback) throw e;
+      mockStates = autoMockStates;
+      setMockDeviceStatesJson(JSON.stringify(mockStates, null, 2));
+    }
+
+    return { params, mockStates, paramsFallback };
   };
 
   const handleRunServer = async () => {
@@ -543,23 +950,41 @@ END_IF`);
     });
     let params = {};
     try {
-      params = parseManualParams();
+      const resolved = resolveRuntimeInputs(debugDataMode, true);
+      params = resolved.params;
+      if (resolved.paramsFallback) {
+        addEvent({
+          source: "frontend",
+          level: "warning",
+          message: "Manual test params were invalid. Auto-generated params were used.",
+        });
+      }
+      setDebugInputError(null);
       addEvent({
         source: "frontend",
         level: "success",
         message: "Test parameters parsed",
       });
     } catch (e) {
-      setOutput(["Error: Invalid JSON in test parameters"]);
+      const message = (e as any)?.message || "Invalid JSON in test parameters";
+      setOutput([`Error: ${message}`]);
+      setDebugInputError(message);
       setFrontendMeta({
         mode: "server",
         parseOk: false,
         durationMs: Math.round(performance.now() - runStart),
+        runCommand: {
+          mode: "server",
+          endpoint: endpoint || "test",
+          params,
+          parseError: message,
+          debugToolsEnabled,
+        },
       });
       addEvent({
         source: "frontend",
         level: "error",
-        message: "Invalid JSON in test parameters",
+        message,
       });
       return;
     }
@@ -581,6 +1006,12 @@ END_IF`);
       endpoint: endpoint || "test",
       status: res.status,
       durationMs: Math.round(performance.now() - runStart),
+      runCommand: {
+        mode: "server",
+        endpoint: endpoint || "test",
+        params,
+        debugToolsEnabled,
+      },
     });
     addEvent({
       source: "frontend",
@@ -609,6 +1040,7 @@ END_IF`);
     resetExecutionConsole();
     setIsDebugging(true);
     setCurrentLine(null);
+    debugStopRequestedRef.current = false;
     addEvent({
       source: "frontend",
       level: "info",
@@ -616,25 +1048,79 @@ END_IF`);
     });
     
     let params = {};
+    let runtimeMockStates: Record<string, any> = {};
     try {
-      params = resolveParams(debugDataMode);
+      const resolved = resolveRuntimeInputs(debugDataMode, true);
+      params = { ...resolved.params };
+      runtimeMockStates = { ...resolved.mockStates };
+      debugMissingParams.forEach((name) => {
+        delete (params as Record<string, any>)[name];
+      });
+      if (resolved.paramsFallback) {
+        addEvent({
+          source: "frontend",
+          level: "warning",
+          message: "Manual test params were invalid. Auto-generated params were used.",
+        });
+      }
+      if (debugMissingParams.length > 0) {
+        addEvent({
+          source: "frontend",
+          level: "warning",
+          message: "Debug run with missing params simulation",
+          details: { removed: [...debugMissingParams] },
+        });
+      }
+      setDebugInputError(null);
     } catch (e) {
-      setOutput(["Error: Invalid JSON in test parameters"]);
+      const message = (e as any)?.message || "Invalid JSON in test parameters";
+      setOutput([`Error: ${message}`]);
+      setDebugInputError(message);
       setIsDebugging(false);
-      setFrontendMeta({ mode: "debug", parseOk: false });
+      setFrontendMeta({
+        mode: "debug",
+        parseOk: false,
+      runCommand: {
+        mode: "debug",
+        parseError: message,
+        debugToolsEnabled,
+      },
+    });
       addEvent({
         source: "frontend",
         level: "error",
-        message: "Invalid JSON in test parameters",
+        message,
       });
       return;
     }
-    setFrontendMeta({ mode: "debug", parseOk: true });
+    setFrontendMeta({
+      mode: "debug",
+      parseOk: true,
+      runMode: debugRunMode,
+      lineDelayMs: debugLineDelayMs,
+      highlightAllLines: debugHighlightLines,
+      missingParams: [...debugMissingParams],
+      runCommand: {
+        mode: "debug",
+        runMode: debugRunMode,
+        lineDelayMs: debugLineDelayMs,
+        highlightAllLines: debugHighlightLines,
+        breakpoints: [...breakpoints],
+        params,
+        mockStates: runtimeMockStates,
+        missingParams: [...debugMissingParams],
+        debugToolsEnabled,
+      },
+    });
+
+    const activeBreakpoints = [...breakpoints];
+    const safeDelay = Math.max(0, Math.min(5000, Number(debugLineDelayMs) || 0));
 
     const engine = new HomeScriptEngine({
       variables: params,
+      queryParams: params,
       debug: true,
-      breakpoints: breakpoints,
+      breakpoints: activeBreakpoints,
       onEvent: (event) => {
         addEvent({
           source: "engine",
@@ -659,6 +1145,20 @@ END_IF`);
         return { success: true, local_dry_run: true };
       },
       onGet: async (entityId) => {
+        if (Object.prototype.hasOwnProperty.call(runtimeMockStates, entityId)) {
+          const mocked = runtimeMockStates[entityId];
+          setHaStateEvents((prev) => [
+            ...prev,
+            {
+              timestamp: new Date().toISOString(),
+              action: "get",
+              status: "success",
+              entityId,
+              value: mocked,
+            },
+          ]);
+          return mocked;
+        }
         const entity = haEntities.find(e => e.entity_id === entityId);
         setHaStateEvents((prev) => [
           ...prev,
@@ -673,6 +1173,7 @@ END_IF`);
         return entity ? entity.state : "unknown";
       },
       onSet: async (entityId, state) => {
+        runtimeMockStates[entityId] = state;
         const isMock = localStorage.getItem("is_mock") === "true";
         const currentHaUrl = localStorage.getItem("ha_url");
         const currentHaToken = localStorage.getItem("ha_token");
@@ -750,8 +1251,18 @@ END_IF`);
       onBreakpoint: async (line, vars) => {
           setCurrentLine(line);
           setVariables(vars);
+          if (debugStopRequestedRef.current) return "STOP";
+          if (debugRunMode === "auto") {
+            if (safeDelay > 0) {
+              await new Promise<void>((resolve) => {
+                window.setTimeout(() => resolve(), safeDelay);
+              });
+            }
+            if (debugStopRequestedRef.current) return "STOP";
+            return "CONTINUE";
+          }
           return new Promise((resolve) => {
-              debugResolver.current = resolve;
+            debugResolver.current = resolve;
           });
       }
     });
@@ -788,6 +1299,7 @@ END_IF`);
         setIsDebugging(false);
         setCurrentLine(null);
         debugResolver.current = null;
+        debugStopRequestedRef.current = false;
     }
   };
 
@@ -800,6 +1312,7 @@ END_IF`);
   };
 
   const handleStop = () => {
+      debugStopRequestedRef.current = true;
       if (debugResolver.current) debugResolver.current("STOP");
   };
 
@@ -812,22 +1325,54 @@ END_IF`);
       message: "Local run started",
     });
     let params = {};
+    let runtimeMockStates: Record<string, any> = {};
     try {
-      params = parseManualParams();
+      const resolved = resolveRuntimeInputs(debugDataMode, true);
+      params = resolved.params;
+      runtimeMockStates = { ...resolved.mockStates };
+      if (resolved.paramsFallback) {
+        addEvent({
+          source: "frontend",
+          level: "warning",
+          message: "Manual test params were invalid. Auto-generated params were used.",
+        });
+      }
+      setDebugInputError(null);
     } catch (e) {
-      setOutput(["Error: Invalid JSON in test parameters"]);
-      setFrontendMeta({ mode: "local", parseOk: false });
+      const message = (e as any)?.message || "Invalid JSON in test parameters";
+      setOutput([`Error: ${message}`]);
+      setDebugInputError(message);
+      setFrontendMeta({
+        mode: "local",
+        parseOk: false,
+        runCommand: {
+          mode: "local",
+          params,
+          parseError: message,
+          debugToolsEnabled,
+        },
+      });
       addEvent({
         source: "frontend",
         level: "error",
-        message: "Invalid JSON in test parameters",
+        message,
       });
       return;
     }
-    setFrontendMeta({ mode: "local", parseOk: true });
+    setFrontendMeta({
+      mode: "local",
+      parseOk: true,
+      runCommand: {
+        mode: "local",
+        params,
+        mockStates: runtimeMockStates,
+        debugToolsEnabled,
+      },
+    });
 
     const engine = new HomeScriptEngine({
       variables: params,
+      queryParams: params,
       onEvent: (event) => {
         addEvent({
           source: "engine",
@@ -937,6 +1482,20 @@ END_IF`);
         return { success: true, local_dry_run: true };
       },
       onGet: async (entityId) => {
+        if (Object.prototype.hasOwnProperty.call(runtimeMockStates, entityId)) {
+          const mocked = runtimeMockStates[entityId];
+          setHaStateEvents((prev) => [
+            ...prev,
+            {
+              timestamp: new Date().toISOString(),
+              action: "get",
+              status: "success",
+              entityId,
+              value: mocked,
+            },
+          ]);
+          return mocked;
+        }
         const isMock = localStorage.getItem("is_mock") === "true";
         const currentHaUrl = localStorage.getItem("ha_url");
         const currentHaToken = localStorage.getItem("ha_token");
@@ -1009,6 +1568,20 @@ END_IF`);
         ]);
         return entity ? entity.state : "unknown";
       },
+      onSet: async (entityId, state) => {
+        runtimeMockStates[entityId] = state;
+        setHaStateEvents((prev) => [
+          ...prev,
+          {
+            timestamp: new Date().toISOString(),
+            action: "set",
+            status: "success",
+            entityId,
+            value: state,
+          },
+        ]);
+        return true;
+      },
       importCallback: async (name: string) => {
         const token = localStorage.getItem("auth_token");
         // We need to fetch the script by endpoint.
@@ -1046,6 +1619,98 @@ END_IF`);
       }
     }
   };
+
+  useEffect(() => {
+    if (!debugToolsEnabled || !showDebugMenu || isDebugging || !endpoint.trim()) return;
+    const token = localStorage.getItem("auth_token");
+    if (!token) return;
+
+    let cancelled = false;
+    const loadLive = async () => {
+      try {
+        const res = await fetch(`/api/debug-access/live/${endpoint.trim()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (!data?.sessionId || data.sessionId === lastRemoteSessionIdRef.current) return;
+        const createdAtMs = data?.createdAt ? Date.parse(String(data.createdAt)) : NaN;
+        const enabledAtMs = debugEnabledAtRef.current;
+        if (enabledAtMs && Number.isFinite(createdAtMs) && createdAtMs < enabledAtMs) return;
+        lastRemoteSessionIdRef.current = data.sessionId;
+        applyRemoteDebugReplay(data.payload || {}, data.createdAt || new Date().toISOString());
+      } catch {
+        // Ignore live replay polling failures.
+      }
+    };
+
+    const timer = window.setInterval(loadLive, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [debugToolsEnabled, showDebugMenu, isDebugging, endpoint]);
+
+  useEffect(() => {
+    if (!debugToolsEnabled) {
+      setDebugLiveSyncStatus("idle");
+      if (debugDraftSyncTimerRef.current) {
+        window.clearTimeout(debugDraftSyncTimerRef.current);
+        debugDraftSyncTimerRef.current = null;
+      }
+      return;
+    }
+    if (isDebugging) return;
+    if (debugDraftSyncTimerRef.current) {
+      window.clearTimeout(debugDraftSyncTimerRef.current);
+      debugDraftSyncTimerRef.current = null;
+    }
+    setDebugLiveSyncStatus("syncing");
+    debugDraftSyncTimerRef.current = window.setTimeout(async () => {
+      if (id) {
+        try {
+          const token = localStorage.getItem("auth_token");
+          const res = await fetch(`/api/scripts/${id}/debug`, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ debugCode: code }),
+          });
+          if (!res.ok) throw new Error("Failed to sync debug draft");
+          setStoredDebugCode(code);
+          setDebugLiveSyncStatus("synced");
+        } catch {
+          setDebugLiveSyncStatus("error");
+        }
+      } else {
+        setStoredDebugCode(code);
+        setDebugLiveSyncStatus("synced");
+      }
+    }, 650);
+
+    return () => {
+      if (debugDraftSyncTimerRef.current) {
+        window.clearTimeout(debugDraftSyncTimerRef.current);
+        debugDraftSyncTimerRef.current = null;
+      }
+    };
+  }, [code, debugToolsEnabled, id, isDebugging]);
+
+  useEffect(() => {
+    return () => {
+      if (debugDraftSyncTimerRef.current) {
+        window.clearTimeout(debugDraftSyncTimerRef.current);
+        debugDraftSyncTimerRef.current = null;
+      }
+      if (remoteReplayTimerRef.current) {
+        window.clearInterval(remoteReplayTimerRef.current);
+        remoteReplayTimerRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <div className="flex flex-col h-full bg-zinc-950">
@@ -1136,9 +1801,9 @@ END_IF`);
               </Button>
               <Button
                 size="icon"
-                className="bg-orange-600 hover:bg-orange-500"
-                onClick={handleDebug}
-                title="Debug"
+                className={debugToolsEnabled ? "bg-orange-600 hover:bg-orange-500" : "bg-zinc-800 hover:bg-zinc-700 text-zinc-400"}
+                onClick={() => { void toggleDebugTools(); }}
+                title={debugToolsEnabled ? "Disable Debug Mode" : "Enable Debug Mode"}
               >
                 <Bug className="w-5 h-5" />
               </Button>
@@ -1162,7 +1827,7 @@ END_IF`);
               defaultLanguage="homescript"
               theme="homescript-dark"
               value={code}
-              onChange={(val) => setCode(val || "")}
+              onChange={(val) => handleCodeChange(val || "")}
               onMount={(editor, monaco) => {
                 editorRef.current = editor;
                 
@@ -1170,11 +1835,12 @@ END_IF`);
               editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
                 setShowCommandPalette(true);
               });
-              editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+                editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
                 void saveHandlerRef.current?.();
               });
 
                 editor.onMouseDown((e: any) => {
+                  if (!debugToolsEnabledRef.current) return;
                   if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
                     const lineNumber = e.target.position.lineNumber;
                     setBreakpoints((prev) => {
@@ -1238,10 +1904,125 @@ END_IF`);
           `}</style>
         </div>
 
-        <div className="w-full lg:w-[34rem] bg-zinc-900 flex flex-col min-h-0 h-[50vh] lg:h-auto border-t lg:border-t-0 border-zinc-800">
-          <div className="p-4 border-b border-zinc-800">
+        <div className="w-full lg:w-[34rem] bg-zinc-900 flex flex-col min-h-0 h-[50vh] lg:h-auto border-t lg:border-t-0 border-zinc-800 overflow-y-auto">
+          <div className="p-4 border-b border-zinc-800 shrink-0">
+            {showDebugMenu && debugToolsEnabled && (
+              <div className="mb-4 rounded-xl border border-orange-700/40 bg-orange-950/20 p-3 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-medium text-orange-200 uppercase tracking-wider">Debug Menu</h3>
+                  <Button
+                    size="sm"
+                    className="bg-orange-600 hover:bg-orange-500"
+                    onClick={handleDebug}
+                    disabled={isDebugging}
+                  >
+                    {isDebugging ? "Debug Running..." : "Start Debug Run"}
+                  </Button>
+                </div>
+                <div className="rounded-lg border border-orange-800/50 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-300">
+                  <div>
+                    Live Debug Draft: edits auto-sync{ id ? " to database `debug_code`" : "" }. Execution runs only via Start Debug Run or debug API call.
+                  </div>
+                  <div className="mt-1">
+                    Save button always writes main script (non-debug) code.
+                  </div>
+                  <div className={`mt-1 font-medium ${
+                    debugLiveSyncStatus === "error"
+                      ? "text-red-300"
+                      : debugLiveSyncStatus === "synced"
+                        ? "text-emerald-300"
+                        : "text-amber-200"
+                  }`}>
+                    Sync status: {debugLiveSyncStatus}
+                  </div>
+                  <div className={`mt-1 ${code === mainCode ? "text-emerald-300" : "text-amber-200"}`}>
+                    Main script status: {code === mainCode ? "matches debug draft" : "different from debug draft"}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className={debugPromotePulse ? "ring-2 ring-emerald-400/60 transition-all" : "transition-all"}
+                    onClick={() => {
+                      setMainCode(code);
+                      setDebugPromotePulse(true);
+                      window.setTimeout(() => setDebugPromotePulse(false), 450);
+                      addEvent({
+                        source: "frontend",
+                        level: "success",
+                        message: "Promoted debug draft to main script",
+                      });
+                    }}
+                  >
+                    Promote Draft To Main
+                  </Button>
+                  <span className="text-xs text-zinc-400">
+                    Save afterwards to persist main script version.
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs text-zinc-400">Run Mode</label>
+                    <select
+                      value={debugRunMode}
+                      onChange={(e) => setDebugRunMode(e.target.value as DebugRunMode)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-orange-500"
+                    >
+                      <option value="auto">Auto play lines</option>
+                      <option value="manual">Manual step/continue</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs text-zinc-400">Line Highlight Delay (ms)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5000}
+                      value={debugLineDelayMs}
+                      onChange={(e) => setDebugLineDelayMs(Number(e.target.value) || 0)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-orange-500"
+                    />
+                  </div>
+                </div>
+                <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={debugHighlightLines}
+                    onChange={(e) => setDebugHighlightLines(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-900"
+                  />
+                  Highlight every executed line
+                </label>
+                <div>
+                  <div className="text-xs text-zinc-400 mb-2">
+                    Simulate missing params (removed before debug run, useful for REQUIRED tests)
+                  </div>
+                  <div className="max-h-24 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 flex flex-wrap gap-2">
+                    {getKnownParamNames().length === 0 ? (
+                      <span className="text-xs text-zinc-600">No parameters detected.</span>
+                    ) : (
+                      getKnownParamNames().map((paramName) => (
+                        <button
+                          key={paramName}
+                          type="button"
+                          onClick={() => toggleMissingParam(paramName)}
+                          className={`px-2 py-1 rounded-md text-xs border transition-colors ${
+                            debugMissingParams.includes(paramName)
+                              ? "border-red-500/60 bg-red-500/20 text-red-200"
+                              : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
+                          }`}
+                        >
+                          {paramName}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
             <h3 className="text-sm font-medium text-zinc-400 mb-2 uppercase tracking-wider">Test Parameters (JSON)</h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3">
               <div className="flex flex-col gap-1.5">
                 <label className="text-xs text-zinc-400">Debug Data Mode</label>
                 <select
@@ -1249,6 +2030,7 @@ END_IF`);
                   onChange={(e) => setDebugDataMode(e.target.value as DebugDataMode)}
                   className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-emerald-500"
                 >
+                  <option value="auto">Auto from script</option>
                   <option value="manual">Manual JSON</option>
                   <option value="preset">Predefined preset</option>
                   <option value="randomized">Randomized preset</option>
@@ -1281,25 +2063,68 @@ END_IF`);
                   Apply Debug Values
                 </Button>
               </div>
+              <div className="flex items-end">
+                <Button size="sm" variant="outline" onClick={applyAutoGeneratedInputs}>
+                  Auto Build Inputs
+                </Button>
+              </div>
             </div>
-            <textarea
-              value={testParams}
-              onChange={(e) => setTestParams(e.target.value)}
-              className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-emerald-400 font-mono text-sm focus:outline-none focus:border-emerald-500 transition-colors resize-none"
+            <div className="rounded-xl overflow-hidden border border-zinc-800">
+              <Editor
+                language="json"
+                value={testParams}
+                onChange={(value) => setTestParams(value || "{}")}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 12,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  scrollBeyondLastLine: false,
+                  lineNumbers: "on",
+                }}
+                height="170px"
+                theme="homescript-dark"
+              />
+            </div>
+            <h3 className="text-sm font-medium text-zinc-400 mt-4 mb-2 uppercase tracking-wider">Mock Device States (JSON)</h3>
+            <p className="text-xs text-zinc-500 mb-2">
+              Key format: entity id. Value format: mocked state returned by GET and updated by SET during local/debug runs.
+            </p>
+            <div className="rounded-xl overflow-hidden border border-zinc-800">
+              <Editor
+                language="json"
+                value={mockDeviceStatesJson}
+                onChange={(value) => setMockDeviceStatesJson(value || "{}")}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 12,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  scrollBeyondLastLine: false,
+                  lineNumbers: "on",
+                }}
+                height="150px"
+                theme="homescript-dark"
+              />
+            </div>
+            {debugInputError && (
+              <div className="mt-3 text-xs rounded-lg px-3 py-2 border border-red-900/70 bg-red-950/30 text-red-300">
+                {debugInputError}
+              </div>
+            )}
+          </div>
+          <div className="flex-1 min-h-[20rem]">
+            <ExecutionConsole
+              output={output}
+              variables={variables}
+              events={executionEvents}
+              haStates={haStateEvents}
+              backendMeta={backendMeta}
+              frontendMeta={frontendMeta}
+              isDebugging={isDebugging}
+              onContinue={handleContinue}
+              onStep={handleStep}
+              onStop={handleStop}
             />
           </div>
-          <ExecutionConsole
-            output={output}
-            variables={variables}
-            events={executionEvents}
-            haStates={haStateEvents}
-            backendMeta={backendMeta}
-            frontendMeta={frontendMeta}
-            isDebugging={isDebugging}
-            onContinue={handleContinue}
-            onStep={handleStep}
-            onStop={handleStop}
-          />
         </div>
       </div>
       <CommandPalette

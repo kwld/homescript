@@ -9,6 +9,7 @@ interface Script {
   name: string;
   endpoint: string;
   created_at: string;
+  debug_enabled?: boolean | number;
 }
 
 export default function Scripts() {
@@ -79,6 +80,11 @@ export default function Scripts() {
                     <FileCode2 className="w-5 h-5 text-emerald-400" />
                   </div>
                   <div className="flex items-center gap-2">
+                    {Boolean(script.debug_enabled) && (
+                      <span className="text-[10px] font-medium uppercase tracking-wider px-2 py-1 rounded-full border border-orange-500/50 bg-orange-500/15 text-orange-200">
+                        Debug On
+                      </span>
+                    )}
                     {deletingId === script.id ? (
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-red-400">Sure?</span>

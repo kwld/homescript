@@ -25,7 +25,7 @@ export interface HAStateEvent {
 export interface BackendRunMeta {
   requestId: string;
   endpoint: string;
-  authMode: "jwt" | "service_key" | "mock" | "unknown";
+  authMode: "jwt" | "service_key" | "debug_bypass" | "mock" | "unknown";
   haMode: "real" | "mock";
   durationMs: number;
   httpStatus: number;
