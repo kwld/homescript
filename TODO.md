@@ -16,7 +16,9 @@ This file is the mandatory execution tracker for all agent work in this reposito
 - [ ] (empty)
 
 ## In Progress
-- [ ] (empty)
+- [ ] Create a proper project `.gitignore`, add it, and commit.
+  - Date: 2026-02-28
+  - Notes: Rewriting `.gitignore` with complete project-safe patterns and committing.
 
 ## Done
 - [x] Create strict `AGENTS.md` rules and set up mandatory `TODO.md` workflow.
