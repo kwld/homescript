@@ -87,3 +87,7 @@ This file is the mandatory execution tracker for all agent work in this reposito
   - Date: 2026-02-28
   - Files: `tsconfig.server.json`, `package.json`, `Dockerfile`, `.dockerignore`, `.gitignore`, `README.md`, `server.ts`, `src/server/routes.ts`, `src/server/routes/*`, `src/server/ws-service.ts`, `src/server/ha-client.ts`, `TODO.md`
   - Outcome: Added full ahead-of-time production build for frontend/server, Linux multi-stage Docker runtime with production deps only, and modularized server routing/runtime components.
+- [x] Rewrite `README.md` completely with up-to-date project documentation.
+  - Date: 2026-02-28
+  - Files: `README.md`, `TODO.md`
+  - Outcome: Replaced README with a complete project guide covering architecture, auth, API usage, WebSocket protocol, production build, Docker, and quality commands.
