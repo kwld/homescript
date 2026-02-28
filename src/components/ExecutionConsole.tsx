@@ -3,7 +3,7 @@ import { AlertCircle, CheckCircle2, Server, Monitor, Activity, Radio } from "luc
 import type { BackendRunMeta, ExecutionEvent, HAStateEvent } from "../shared/execution-report";
 import { Button } from "./ui/Button";
 
-type ConsoleTab = "logs" | "state" | "ha" | "backend" | "frontend";
+type ConsoleTab = "raw" | "logs" | "state" | "ha" | "backend" | "frontend";
 
 interface ExecutionConsoleProps {
   output: string[];
@@ -37,7 +37,7 @@ export default function ExecutionConsole({
   onStep,
   onStop,
 }: ExecutionConsoleProps) {
-  const [tab, setTab] = useState<ConsoleTab>("logs");
+  const [tab, setTab] = useState<ConsoleTab>("raw");
   const [errorsOnly, setErrorsOnly] = useState(false);
 
   const filteredEvents = useMemo(() => {
@@ -49,6 +49,7 @@ export default function ExecutionConsole({
     <div className="flex-1 p-4 overflow-y-auto flex flex-col">
       <div className="mb-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
+          <Button variant={tab === "raw" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("raw")}>Raw</Button>
           <Button variant={tab === "logs" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("logs")}>Logs</Button>
           <Button variant={tab === "state" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("state")}>State</Button>
           <Button variant={tab === "ha" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("ha")}>HA</Button>
@@ -68,6 +69,18 @@ export default function ExecutionConsole({
           )}
         </div>
       </div>
+
+      {tab === "raw" && (
+        <div className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl p-3 overflow-y-auto">
+          <div className="font-mono text-sm text-zinc-300 space-y-1">
+            {output.length === 0 ? (
+              <span className="text-zinc-600">No print output.</span>
+            ) : (
+              output.map((line, i) => <div key={i}>{line}</div>)
+            )}
+          </div>
+        </div>
+      )}
 
       {tab === "logs" && (
         <div className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl p-3 overflow-y-auto space-y-2">

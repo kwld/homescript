@@ -1,4 +1,4 @@
-import { Express, Request, Response } from "express";
+import { Express, Request, Response as ExpressResponse } from "express";
 import { v4 as uuidv4 } from "uuid";
 import jwt from "jsonwebtoken";
 import {
@@ -11,13 +11,15 @@ import {
   createScript,
   updateScript,
   deleteScript,
-  verifyApiKey
+  verifyApiKey,
+  verifyServiceCredentials
 } from "./db.js";
 import { HomeScriptEngine, HomeScriptTraceEvent } from "../shared/homescript.js";
 import { ExecutionEvent, ExecutionReport, HAStateEvent } from "../shared/execution-report.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
 const USE_MOCKS = process.env.MOCK !== 'disabled';
+const HA_TIMEOUT_MS = Number(process.env.HA_TIMEOUT_MS || 8000);
 
 const getAuthentikBaseUrl = () => {
   if (process.env.AUTHENTIK_URL) return process.env.AUTHENTIK_URL;
@@ -31,9 +33,59 @@ const getAuthentikBaseUrl = () => {
   return null;
 };
 
+const normalizeHaError = (error: unknown, url: string): string => {
+  const err = error as any;
+
+  if (err?.name === "AbortError") {
+    return `Home Assistant request timed out after ${HA_TIMEOUT_MS}ms (${url})`;
+  }
+
+  const causeCode = err?.cause?.code;
+  if (causeCode === "ETIMEDOUT") {
+    return `Home Assistant connection timed out (${url})`;
+  }
+  if (causeCode === "ECONNREFUSED") {
+    return `Home Assistant connection refused (${url})`;
+  }
+  if (causeCode === "ENOTFOUND") {
+    return `Home Assistant host not found (${url})`;
+  }
+
+  if (typeof err?.message === "string" && err.message.length > 0) {
+    return `Home Assistant request failed: ${err.message}`;
+  }
+  return "Home Assistant request failed";
+};
+
+const fetchFromHomeAssistant = async (path: string, init: RequestInit = {}): Promise<Response> => {
+  if (!process.env.HA_URL || !process.env.HA_TOKEN) {
+    throw new Error("Home Assistant is not configured on the server");
+  }
+
+  const url = `${process.env.HA_URL}${path}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HA_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      ...init,
+      headers: {
+        "Authorization": `Bearer ${process.env.HA_TOKEN}`,
+        "Content-Type": "application/json",
+        ...(init.headers || {}),
+      },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    throw new Error(normalizeHaError(error, url));
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 export function setupRoutes(app: Express) {
   // --- Auth Middleware ---
-  const requireAuth = (req: Request, res: Response, next: Function) => {
+  const requireAuth = (req: Request, res: ExpressResponse, next: Function) => {
     // Check for Bearer token
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -51,6 +103,17 @@ export function setupRoutes(app: Express) {
       }
     }
     // Check for service account
+    const serviceIdHeader = req.headers['x-service-id'];
+    const serviceSecretHeader = req.headers['x-service-secret'];
+    if (typeof serviceIdHeader === 'string' && typeof serviceSecretHeader === 'string') {
+      const account = verifyServiceCredentials(serviceIdHeader, serviceSecretHeader);
+      if (account) {
+        (req as any).serviceAccount = account;
+        return next();
+      }
+    }
+
+    // Legacy single-header service key support
     const apiKey = req.headers['x-service-key'];
     if (apiKey && typeof apiKey === 'string') {
       const account = verifyApiKey(apiKey);
@@ -219,21 +282,16 @@ export function setupRoutes(app: Express) {
   app.get("/api/states", requireAuth, async (req, res) => {
     if (process.env.HA_URL && process.env.HA_TOKEN) {
       try {
-        const haRes = await fetch(`${process.env.HA_URL}/api/states`, {
-          headers: {
-            "Authorization": `Bearer ${process.env.HA_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        });
+        const haRes = await fetchFromHomeAssistant("/api/states");
         if (!haRes.ok) {
-          console.error(`Failed to fetch states from HA: ${haRes.statusText}`);
+          console.error(`Failed to fetch states from Home Assistant: HTTP ${haRes.status} ${haRes.statusText}`);
           return res.json([]);
         } else {
           const states = await haRes.json();
           return res.json(states);
         }
-      } catch (e) {
-        console.error("Error connecting to Home Assistant:", e);
+      } catch (e: any) {
+        console.error(e.message || "Error connecting to Home Assistant");
         return res.json([]);
       }
     }
@@ -244,21 +302,16 @@ export function setupRoutes(app: Express) {
     // If HA_URL and HA_TOKEN are set, fetch from real HA
     if (process.env.HA_URL && process.env.HA_TOKEN) {
       try {
-        const haRes = await fetch(`${process.env.HA_URL}/api/services`, {
-          headers: {
-            "Authorization": `Bearer ${process.env.HA_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        });
+        const haRes = await fetchFromHomeAssistant("/api/services");
         if (!haRes.ok) {
-          console.error(`Failed to fetch services from HA: ${haRes.statusText}`);
+          console.error(`Failed to fetch services from Home Assistant: HTTP ${haRes.status} ${haRes.statusText}`);
           // Fallback to mock
         } else {
           const services = await haRes.json();
           return res.json(services);
         }
-      } catch (e) {
-        console.error("Error connecting to Home Assistant:", e);
+      } catch (e: any) {
+        console.error(e.message || "Error connecting to Home Assistant");
         // Fallback to mock
       }
     }
@@ -302,12 +355,8 @@ export function setupRoutes(app: Express) {
     if (process.env.HA_URL && process.env.HA_TOKEN) {
       try {
         const { domain, service, serviceData } = req.body;
-        const haRes = await fetch(`${process.env.HA_URL}/api/services/${domain}/${service}`, {
+        const haRes = await fetchFromHomeAssistant(`/api/services/${domain}/${service}`, {
           method: 'POST',
-          headers: {
-            "Authorization": `Bearer ${process.env.HA_TOKEN}`,
-            "Content-Type": "application/json",
-          },
           body: JSON.stringify(serviceData || {})
         });
         if (!haRes.ok) {
@@ -317,7 +366,7 @@ export function setupRoutes(app: Express) {
         const result = await haRes.json();
         return res.json(result);
       } catch (e: any) {
-        return res.status(500).json({ error: e.message });
+        return res.status(502).json({ error: e.message || "Failed to connect to Home Assistant" });
       }
     }
     
@@ -341,7 +390,17 @@ export function setupRoutes(app: Express) {
     const apiKey = `sk_${uuidv4().replace(/-/g, '')}`;
     
     createServiceAccount(id, name, apiKey);
-    res.json({ id, name, apiKey });
+    res.json({
+      id,
+      name,
+      apiKey, // legacy field
+      serviceId: id,
+      serviceSecret: apiKey,
+      headers: {
+        "x-service-id": id,
+        "x-service-secret": apiKey,
+      },
+    });
   });
 
   app.delete("/api/service-accounts/:id", requireAuth, (req, res) => {

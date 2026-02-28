@@ -47,7 +47,7 @@ export default function Dashboard() {
         <ol className="list-decimal list-inside space-y-4 text-zinc-300">
           <li>Go to <Link to="/accounts" className="text-indigo-400 hover:underline">Service Accounts</Link> and create a new API key.</li>
           <li>Navigate to <Link to="/scripts" className="text-emerald-400 hover:underline">HomeScripts</Link> and write your first automation.</li>
-          <li>Call your script's endpoint using the generated API key in the <code className="bg-zinc-800 px-2 py-1 rounded text-sm">X-Service-Key</code> header.</li>
+          <li>Call your script endpoint with <code className="bg-zinc-800 px-2 py-1 rounded text-sm">X-Service-Id</code> and <code className="bg-zinc-800 px-2 py-1 rounded text-sm">X-Service-Secret</code> headers.</li>
         </ol>
       </Card>
     </div>

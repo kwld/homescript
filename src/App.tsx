@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Link, useNavigate, useLocation } from "react-router-dom";
-import { Home, Key, FileCode2, BookOpen, LogOut, Shield, Menu, X, Box, Settings } from "lucide-react";
+import { Home, Key, FileCode2, BookOpen, LogOut, Shield, Menu, X, Box, Settings, Bot } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import ServiceAccounts from "./pages/ServiceAccounts";
 import Scripts from "./pages/Scripts";
 import ScriptEditor from "./pages/ScriptEditor";
 import Guides from "./pages/Guides";
 import Entities from "./pages/Entities";
+import LLMHomeScriptGuide from "./pages/LLMHomeScriptGuide";
 import HASettingsModal from "./components/HASettingsModal";
 import { Button } from "./components/ui/Button";
 
@@ -201,6 +202,10 @@ function Layout({ children }: { children: React.ReactNode }) {
             <BookOpen className="w-5 h-5 text-zinc-400" />
             Setup Guides
           </Link>
+          <Link to="/guides/llm-homescript" className="flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-zinc-800 transition-colors">
+            <Bot className="w-5 h-5 text-zinc-400" />
+            LLM HomeScript Guide
+          </Link>
         </nav>
         <div className="p-4 border-t border-zinc-800">
           <div className="flex items-center justify-between px-4 py-3 bg-zinc-950 rounded-xl border border-zinc-800">
@@ -220,7 +225,7 @@ function Layout({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col overflow-hidden h-[calc(100vh-65px)] md:h-screen">
+      <main className="flex-1 flex flex-col overflow-y-auto overflow-x-hidden h-[calc(100vh-65px)] md:h-screen">
         {children}
       </main>
       <HASettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
@@ -240,6 +245,7 @@ export default function App() {
           <Route path="/scripts/:id" element={<ScriptEditor />} />
           <Route path="/entities" element={<Entities />} />
           <Route path="/guides" element={<Guides />} />
+          <Route path="/guides/llm-homescript" element={<LLMHomeScriptGuide />} />
         </Routes>
       </Layout>
     </BrowserRouter>

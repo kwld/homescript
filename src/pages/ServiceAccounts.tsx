@@ -10,17 +10,23 @@ interface Account {
   created_at: string;
 }
 
+interface NewCredentials {
+  name: string;
+  serviceId: string;
+  serviceSecret: string;
+}
+
 export default function ServiceAccounts() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [name, setName] = useState("");
-  const [newKey, setNewKey] = useState<{ name: string; apiKey: string } | null>(null);
+  const [newCredentials, setNewCredentials] = useState<NewCredentials | null>(null);
   const [copied, setCopied] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const fetchAccounts = async () => {
     const token = localStorage.getItem("auth_token");
     const res = await fetch("/api/service-accounts", {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (res.ok) setAccounts(await res.json());
   };
@@ -34,15 +40,19 @@ export default function ServiceAccounts() {
     const token = localStorage.getItem("auth_token");
     const res = await fetch("/api/service-accounts", {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ name }),
     });
     if (res.ok) {
       const data = await res.json();
-      setNewKey(data);
+      setNewCredentials({
+        name: data.name,
+        serviceId: data.serviceId || data.id,
+        serviceSecret: data.serviceSecret || data.apiKey,
+      });
       setName("");
       fetchAccounts();
     }
@@ -50,9 +60,9 @@ export default function ServiceAccounts() {
 
   const handleDelete = async (id: string) => {
     const token = localStorage.getItem("auth_token");
-    const res = await fetch(`/api/service-accounts/${id}`, { 
+    const res = await fetch(`/api/service-accounts/${id}`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (res.ok) {
       setDeletingId(null);
@@ -60,9 +70,12 @@ export default function ServiceAccounts() {
     }
   };
 
-  const copyKey = () => {
-    if (newKey) {
-      navigator.clipboard.writeText(newKey.apiKey);
+  const copyHeaders = () => {
+    if (newCredentials) {
+      const headersText =
+        `x-service-id: ${newCredentials.serviceId}\n` +
+        `x-service-secret: ${newCredentials.serviceSecret}`;
+      navigator.clipboard.writeText(headersText);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -73,42 +86,56 @@ export default function ServiceAccounts() {
       <header className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-semibold text-white mb-2">Service Accounts</h1>
-          <p className="text-zinc-400">Manage API keys for external services.</p>
+          <p className="text-zinc-400">Manage service credentials for external callers.</p>
         </div>
       </header>
 
-      {newKey && (
+      {newCredentials && (
         <div className="bg-emerald-500/10 border border-emerald-500/20 p-6 rounded-2xl mb-8">
           <h2 className="text-emerald-400 font-medium mb-2 flex items-center gap-2">
             <Key className="w-5 h-5" />
-            New API Key Generated
+            New Service Credentials Generated
           </h2>
           <p className="text-zinc-300 text-sm mb-4">
-            Please copy this key now. You won't be able to see it again!
+            Copy both headers now. Secret is shown only once.
           </p>
-          <div className="flex items-center gap-4">
-            <code className="bg-zinc-950 px-4 py-3 rounded-xl border border-zinc-800 flex-1 text-emerald-300 font-mono">
-              {newKey.apiKey}
-            </code>
-            <Button
-              variant="secondary"
-              onClick={copyKey}
-              className="flex items-center gap-2"
-            >
+
+          <div className="space-y-3">
+            <div className="bg-zinc-950 px-4 py-3 rounded-xl border border-zinc-800 text-emerald-300 font-mono text-sm break-all">
+              <div className="text-zinc-500 mb-1">x-service-id</div>
+              <div>{newCredentials.serviceId}</div>
+            </div>
+            <div className="bg-zinc-950 px-4 py-3 rounded-xl border border-zinc-800 text-emerald-300 font-mono text-sm break-all">
+              <div className="text-zinc-500 mb-1">x-service-secret</div>
+              <div>{newCredentials.serviceSecret}</div>
+            </div>
+            <div className="bg-zinc-950 px-4 py-3 rounded-xl border border-zinc-800 text-zinc-300 font-mono text-xs overflow-x-auto">
+              {`curl -X POST "<your-url>/api/run/<endpoint>" \\\n  -H "x-service-id: ${newCredentials.serviceId}" \\\n  -H "x-service-secret: ${newCredentials.serviceSecret}" \\\n  -H "Content-Type: application/json" \\\n  -d '{}'`}
+            </div>
+            <Button variant="secondary" onClick={copyHeaders} className="flex items-center gap-2">
               {copied ? <Check className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
-              {copied ? "Copied" : "Copy"}
+              {copied ? "Copied Headers" : "Copy Headers"}
             </Button>
           </div>
+
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setNewKey(null)}
+            onClick={() => setNewCredentials(null)}
             className="mt-4"
           >
             Dismiss
           </Button>
         </div>
       )}
+
+      <div className="mb-6 bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-sm text-zinc-300">
+        <p className="mb-2">Use these request headers for service authentication:</p>
+        <div className="font-mono text-xs text-emerald-300 bg-zinc-950 border border-zinc-800 rounded-xl p-3">
+          <div>x-service-id: &lt;service_account_id&gt;</div>
+          <div>x-service-secret: &lt;service_account_secret&gt;</div>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-1">
@@ -126,12 +153,9 @@ export default function ServiceAccounts() {
                   placeholder="e.g. Node-RED, Grafana"
                   required
                 />
-                <Button
-                  type="submit"
-                  className="w-full bg-indigo-600 hover:bg-indigo-500"
-                >
+                <Button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-500">
                   <Plus className="w-5 h-5" />
-                  Generate Key
+                  Generate Credentials
                 </Button>
               </CardContent>
             </form>
@@ -144,6 +168,7 @@ export default function ServiceAccounts() {
               <thead>
                 <tr className="border-b border-zinc-800 bg-zinc-950/50">
                   <th className="px-6 py-4 text-sm font-medium text-zinc-400">Name</th>
+                  <th className="px-6 py-4 text-sm font-medium text-zinc-400">Service ID</th>
                   <th className="px-6 py-4 text-sm font-medium text-zinc-400">Created At</th>
                   <th className="px-6 py-4 text-sm font-medium text-zinc-400 text-right">Actions</th>
                 </tr>
@@ -151,7 +176,7 @@ export default function ServiceAccounts() {
               <tbody className="divide-y divide-zinc-800">
                 {accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={3} className="px-6 py-8 text-center text-zinc-500">
+                    <td colSpan={4} className="px-6 py-8 text-center text-zinc-500">
                       No service accounts found.
                     </td>
                   </tr>
@@ -159,6 +184,7 @@ export default function ServiceAccounts() {
                   accounts.map((acc) => (
                     <tr key={acc.id} className="hover:bg-zinc-800/50 transition-colors">
                       <td className="px-6 py-4 text-white font-medium">{acc.name}</td>
+                      <td className="px-6 py-4 text-zinc-300 text-sm font-mono">{acc.id}</td>
                       <td className="px-6 py-4 text-zinc-400 text-sm">
                         {new Date(acc.created_at).toLocaleString()}
                       </td>
@@ -166,18 +192,10 @@ export default function ServiceAccounts() {
                         {deletingId === acc.id ? (
                           <div className="flex items-center justify-end gap-2">
                             <span className="text-sm text-red-400 mr-2">Sure?</span>
-                            <Button
-                              variant="danger"
-                              size="sm"
-                              onClick={() => handleDelete(acc.id)}
-                            >
+                            <Button variant="danger" size="sm" onClick={() => handleDelete(acc.id)}>
                               Yes
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => setDeletingId(null)}
-                            >
+                            <Button variant="ghost" size="sm" onClick={() => setDeletingId(null)}>
                               No
                             </Button>
                           </div>

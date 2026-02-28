@@ -3,7 +3,7 @@ import { Card } from "../components/ui/Card";
 
 export default function Guides() {
   return (
-    <div className="p-8 overflow-y-auto max-w-4xl mx-auto">
+    <div className="p-8 max-w-4xl mx-auto">
       <header className="mb-12 text-center">
         <h1 className="text-4xl font-semibold text-white mb-4">Setup Guides</h1>
         <p className="text-zinc-400 text-lg">Learn how to configure SSO and connect to your Home Assistant instance.</p>

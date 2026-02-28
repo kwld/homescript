@@ -56,6 +56,11 @@ export function verifyApiKey(apiKey: string) {
   return stmt.get(apiKey);
 }
 
+export function verifyServiceCredentials(id: string, secret: string) {
+  const stmt = db.prepare("SELECT id, name FROM service_accounts WHERE id = ? AND api_key = ?");
+  return stmt.get(id, secret);
+}
+
 export function getScripts() {
   return db.prepare("SELECT id, name, endpoint, created_at FROM scripts").all();
 }
