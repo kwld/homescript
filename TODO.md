@@ -16,9 +16,7 @@ This file is the mandatory execution tracker for all agent work in this reposito
 - [ ] (empty)
 
 ## In Progress
-- [ ] Create a proper project `.gitignore`, add it, and commit.
-  - Date: 2026-02-28
-  - Notes: Rewriting `.gitignore` with complete project-safe patterns and committing.
+- [ ] (empty)
 
 ## Done
 - [x] Create strict `AGENTS.md` rules and set up mandatory `TODO.md` workflow.
@@ -69,3 +67,7 @@ This file is the mandatory execution tracker for all agent work in this reposito
   - Date: 2026-02-28
   - Files: `HA_CONTEXT.md`, `TODO.md`
   - Outcome: Probed live HA instance (version/connectivity/services/states), cross-checked official API/changelog sources, and documented current coverage plus gaps for full HA API support.
+- [x] Create a proper project `.gitignore`, add it, and commit.
+  - Date: 2026-02-28
+  - Files: `.gitignore`, `TODO.md`
+  - Outcome: Added complete ignore rules for dependencies, build/test artifacts, logs, env secrets, local databases, and editor/OS files.
