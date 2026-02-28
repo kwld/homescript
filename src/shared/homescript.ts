@@ -1,3 +1,6 @@
+import { evaluateHomeScriptExpression } from "./homescript/expression.js";
+import { collectIfCondition, ScriptLine } from "./homescript/if-condition.js";
+
 export class HomeScriptError extends Error {
   constructor(message: string, public line: number) {
     super(`[Line ${line}] ${message}`);
@@ -61,7 +64,7 @@ export class HomeScriptEngine {
 
   public async execute(code: string): Promise<{ output: string[], variables: Record<string, any> }> {
     this.emitEvent({ type: "execution_start", level: "info", message: "Execution started" });
-    const lines = code.split('\n').map((l, i) => ({ content: l.trim(), lineNumber: i + 1 }));
+    const lines: ScriptLine[] = code.split('\n').map((l, i) => ({ content: l.trim(), lineNumber: i + 1 }));
     
     // First pass: Register functions
     await this.registerFunctions(lines);
@@ -77,7 +80,7 @@ export class HomeScriptEngine {
     }
   }
 
-  private async registerFunctions(lines: { content: string, lineNumber: number }[]): Promise<void> {
+  private async registerFunctions(lines: ScriptLine[]): Promise<void> {
     let i = 0;
     while (i < lines.length) {
       const line = lines[i].content;
@@ -116,7 +119,7 @@ export class HomeScriptEngine {
     }
   }
 
-  private async executeBlock(lines: { content: string, lineNumber: number }[], start: number, end: number): Promise<void> {
+  private async executeBlock(lines: ScriptLine[], start: number, end: number): Promise<void> {
     let i = start;
     while (i < end) {
       const lineObj = lines[i];
@@ -360,7 +363,7 @@ export class HomeScriptEngine {
     }
   }
 
-  private async handleCall(line: string, lineNumber: number, lines: { content: string, lineNumber: number }[] = []) {
+  private async handleCall(line: string, lineNumber: number, lines: ScriptLine[] = []) {
     const match = line.match(/^CALL\s+([a-zA-Z0-9_.]+)\((.*)\)$/);
     if (!match) throw new HomeScriptError("Invalid CALL syntax. Expected: CALL service.action(args)", lineNumber);
     const serviceOrFunc = match[1];
@@ -416,7 +419,7 @@ export class HomeScriptEngine {
     }
   }
 
-  private async executeFunction(name: string, args: any[], lines: { content: string, lineNumber: number }[]) {
+  private async executeFunction(name: string, args: any[], lines: ScriptLine[]) {
       const func = this.functions.get(name);
       if (!func) throw new Error(`Function ${name} not found`); // Should be checked before
 
@@ -450,22 +453,27 @@ export class HomeScriptEngine {
       }
   }
 
-  private async handleIf(lines: { content: string, lineNumber: number }[], startIndex: number, maxEnd: number): Promise<number> {
+  private async handleIf(lines: ScriptLine[], startIndex: number, maxEnd: number): Promise<number> {
     const lineObj = lines[startIndex];
-    const match = lineObj.content.match(/^IF\s+(.+)$/);
-    if (!match) throw new HomeScriptError("Invalid IF syntax", lineObj.lineNumber);
+    let parsedCondition;
+    try {
+      parsedCondition = collectIfCondition(lines, startIndex, maxEnd);
+    } catch {
+      throw new HomeScriptError("Invalid IF syntax", lineObj.lineNumber);
+    }
+    const conditionStart = parsedCondition.lastConditionLineIndex;
 
     // Collect all branches: IF, ELSE IF, ELSE
     const branches: { type: 'IF' | 'ELSE_IF' | 'ELSE', condition?: string, startLine: number, endLine: number }[] = [];
     
-    let currentBranchStart = startIndex;
-    let currentCondition = match[1];
+    let currentBranchStart = conditionStart;
+    let currentCondition = parsedCondition.condition;
     let currentType: 'IF' | 'ELSE_IF' | 'ELSE' = 'IF';
 
     let depth = 0;
     let endIndex = -1;
 
-    for (let i = startIndex + 1; i < maxEnd; i++) {
+    for (let i = conditionStart + 1; i < maxEnd; i++) {
       const content = lines[i].content;
       if (content.length === 0 || content.startsWith('#')) continue;
 
@@ -490,9 +498,15 @@ export class HomeScriptEngine {
       } else if (depth === 0) {
         if (kw === 'ELSE') {
           if (tokens[1] === 'IF') {
-            // ELSE IF
-            const elseIfMatch = content.match(/^ELSE\s+IF\s+(.+)$/);
-            if (!elseIfMatch) throw new HomeScriptError("Invalid ELSE IF syntax", lines[i].lineNumber);
+            // ELSE IF (supports multiline condition continuation)
+            const synthetic = [...lines];
+            synthetic[i] = { ...lines[i], content: content.replace(/^ELSE\s+IF\s+/i, "IF ") };
+            let elseIfParsed;
+            try {
+              elseIfParsed = collectIfCondition(synthetic, i, maxEnd);
+            } catch {
+              throw new HomeScriptError("Invalid ELSE IF syntax", lines[i].lineNumber);
+            }
             
             // Close previous branch
             branches.push({
@@ -503,9 +517,10 @@ export class HomeScriptEngine {
             });
 
             // Start new branch
-            currentBranchStart = i;
-            currentCondition = elseIfMatch[1];
+            currentBranchStart = elseIfParsed.lastConditionLineIndex;
+            currentCondition = elseIfParsed.condition;
             currentType = 'ELSE_IF';
+            i = elseIfParsed.lastConditionLineIndex;
           } else {
             // ELSE
             // Close previous branch
@@ -563,7 +578,7 @@ export class HomeScriptEngine {
     return endIndex + 1;
   }
 
-  private async handleWhile(lines: { content: string, lineNumber: number }[], startIndex: number, maxEnd: number): Promise<number> {
+  private async handleWhile(lines: ScriptLine[], startIndex: number, maxEnd: number): Promise<number> {
     const lineObj = lines[startIndex];
     const match = lineObj.content.match(/^WHILE\s+(.+)\s+DO$/);
     if (!match) throw new HomeScriptError("Invalid WHILE syntax. Expected: WHILE condition DO", lineObj.lineNumber);
@@ -620,28 +635,6 @@ export class HomeScriptEngine {
   }
 
   private evaluateExpression(expr: string): any {
-    // Replace $var with __vars__["var"] but IGNORE variables inside string literals
-    // Regex matches:
-    // 1. String literals: "..." (captured in group 1)
-    // 2. Variables: $var (captured in group 2)
-    const tokenRegex = /("[^"]*")|\$([a-zA-Z0-9_]+)/g;
-    
-    const jsExpr = expr.replace(tokenRegex, (match, stringLiteral, varName) => {
-      if (stringLiteral) {
-        return stringLiteral; // Return strings unchanged
-      }
-      if (varName) {
-        return `__vars__["${varName}"]`; // Replace variables
-      }
-      return match;
-    });
-
-    // Create a function that has access to Math functions and variables
-    const mathKeys = Object.getOwnPropertyNames(Math);
-    const mathValues = mathKeys.map(key => (Math as any)[key]);
-    
-    // Add __vars__ to the arguments
-    const func = new Function(...mathKeys, '__vars__', `return ${jsExpr}`);
-    return func(...mathValues, this.variables);
+    return evaluateHomeScriptExpression(expr, this.variables);
   }
 }
