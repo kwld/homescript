@@ -13,24 +13,26 @@ This file is the mandatory execution tracker for all agent work in this reposito
    - One-line outcome summary
 
 ## Planned
-- [ ]Add in /scripts/id an prompt generator fully featured and modern prompt.
-    It MUST:
-    - Create `copy-ready` prompt for user.
-    - option to select entities from ha itself and include their values to set/get so ai knows what has access to.
-    - VERY detailed instructions for maximum context usage.
-    - DETAILED instructions of getting and setting 
-    - Have full description of HomeScript code and its name.
-    - Extra input to append users message.
-    - Have multiple modes: CREATE, UPDATE, OPTIMIZE, API
-      - CREATE: Doesn't include current code.
-      - UPDATE: Includes current code in the prompt and message about it.
-      - OPTIMIZE: similar to above but with generated message to optimize.
-      - API: Completly different message about this specific command API endpoint.
 
 ## In Progress
-- [ ] (empty)
 
 ## Done
+- [x] Auto-generate Monaco `$COMMON` suggestions via standardized completion factory.
+  - Date: 2026-03-01
+  - Files: `src/shared/homescript/common-lib.ts`, `src/shared/homescript/monaco-completion-factory.ts`, `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Centralized `$COMMON` function descriptors and added Monaco suggestion factory so completion entries update automatically from the runtime common-lib definitions without manual editor list edits.
+- [x] Add built-in HomeScript common utility library (`$COMMON`) with LLM-injectable documentation.
+  - Date: 2026-03-01
+  - Files: `src/shared/homescript/common-lib.ts`, `src/shared/homescript.ts`, `src/shared/homescript.test.ts`, `src/pages/ScriptEditor.tsx`, `HOMESCRIPT_COMMON_LIB.md`, `LLM_HOMESCRIPT_GUIDE.md`, `TODO.md`
+  - Outcome: Added runtime-injected `$COMMON` math/string/array helpers, documented them in dedicated markdown reference for LLM prompt injection, wired helper reference into Script Editor prompt generator, and covered behavior with engine tests.
+- [x] Move Script Editor LLM prompt generator out of right-side developer panel into dedicated custom modal.
+  - Date: 2026-02-28
+  - Files: `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Prompt generator is now opened from header via wand button into a separate overlay modal, preserving the right debug/developer panel space while keeping copy-ready generation and entity selection workflows.
+- [x] Add `/scripts/:id` LLM prompt generator with copy-ready output, HA entity context selection, and multi-mode templates.
+  - Date: 2026-02-28
+  - Files: `src/pages/ScriptEditor.tsx`, `TODO.md`
+  - Outcome: Added inline prompt builder with CREATE/UPDATE/OPTIMIZE/API modes, selectable HA entities with live state context, appended user request input, and one-click copy-ready prompt generation including detailed HomeScript and SET/GET/CALL guidance.
 - [x] Add service-header auth schemes to Swagger and refresh docs revision on script save/update/delete.
   - Date: 2026-02-28
   - Files: `src/server/openapi-revision.ts`, `src/server/openapi.ts`, `src/server/routes/endpoints/scripts.ts`, `src/server/routes/endpoints/docs.ts`, `TODO.md`
