@@ -168,6 +168,18 @@ Available in script as:
 - Invalid JSON payload in API request.
 - Missing auth headers (`x-service-id`, `x-service-secret`).
 
+## 9.1 Built-in Common Helpers (`$COMMON`)
+
+Runtime injects a helper library for math/string/array operations:
+- `$COMMON.math.*`
+- `$COMMON.string.*`
+- `$COMMON.array.*`
+
+Use these helpers instead of long inline expressions when possible.
+
+Full reference:
+- `HOMESCRIPT_COMMON_LIB.md`
+
 ## 10. LLM Prompt Template
 
 Use this prompt when asking an LLM for script generation:

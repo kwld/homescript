@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Editor, { useMonaco } from "@monaco-editor/react";
-import { Save, Play, ArrowLeft, Laptop, Bug, StopCircle, ArrowRight, Webhook, AlertCircle } from "lucide-react";
+import { Save, Play, ArrowLeft, Laptop, Bug, Pause, Square, Webhook, AlertCircle, Copy, Check, WandSparkles } from "lucide-react";
 import { HomeScriptEngine, HomeScriptError } from "../shared/homescript";
 import { validateHomeScript } from "../shared/homescript/validation";
+import { HOME_SCRIPT_COMMON_LLM_REFERENCE } from "../shared/homescript/common-lib";
+import { createCommonLibMonacoSuggestionFactory } from "../shared/homescript/monaco-completion-factory";
 import { BrowserHAConnection } from "../client/ha-connection";
 import { HAEntity, HAServices } from "../shared/ha-api";
 import { BackendRunMeta, ExecutionEvent, ExecutionReport, HAStateEvent } from "../shared/execution-report";
@@ -11,15 +13,190 @@ import { ScriptTriggerConfig, defaultTriggerConfig, normalizeScriptTriggerConfig
 import CommandPalette from "../components/CommandPalette";
 import ExecutionConsole from "../components/ExecutionConsole";
 import EventTriggerConfigurator from "../components/EventTriggerConfigurator";
+import FloatingVariablesPanel from "../components/FloatingVariablesPanel";
 import { Button } from "../components/ui/Button";
 
 type DebugDataMode = "auto" | "manual" | "preset" | "randomized";
-type DebugRunMode = "auto" | "manual";
+type PromptMode = "CREATE" | "UPDATE" | "OPTIMIZE" | "API";
 
 const DEBUG_PRESETS: Record<string, Record<string, any>> = {
   climate: { temperature: 24, humidity: 48, illuminance: 350, motion: false },
   night_mode: { temperature: 20, humidity: 55, illuminance: 5, motion: true },
   energy_peak: { power: 3400, voltage: 232, current: 14.7, grid_price: 1.12 },
+};
+
+const EVENTS_HEADER = "@events {";
+const EVENT_EXPRESSION_HEADER = "@event_expression {";
+
+type MetaBlocks = {
+  hasMeta: boolean;
+  body: string;
+  eventsRaw: string;
+  eventExpressionRaw: string;
+};
+
+type MetaParseResult = {
+  eventStart: number;
+  eventEnd: number;
+  exprStart: number;
+  exprEnd: number;
+  bodyStart: number;
+  eventsRaw: string;
+  eventExpressionRaw: string;
+};
+
+const findMatchingBraceLine = (lines: string[], startLine: number): number => {
+  let depth = 1;
+  let inString = false;
+  let escaped = false;
+  for (let i = startLine + 1; i < lines.length; i += 1) {
+    const line = lines[i] || "";
+    for (let c = 0; c < line.length; c += 1) {
+      const ch = line[c];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") depth += 1;
+      if (ch === "}") depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+};
+
+const findClosingLineByToken = (lines: string[], startLine: number, token = "}") => {
+  for (let i = startLine + 1; i < lines.length; i += 1) {
+    if ((lines[i] || "").trim() === token) return i;
+  }
+  return -1;
+};
+
+const parseMetaFromTop = (source: string): MetaParseResult | null => {
+  const lines = String(source || "").split("\n");
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === "") i += 1;
+  if ((lines[i] || "").trim() !== EVENTS_HEADER) return null;
+  const eventStart = i;
+  const eventEnd =
+    findMatchingBraceLine(lines, eventStart) >= 0
+      ? findMatchingBraceLine(lines, eventStart)
+      : findClosingLineByToken(lines, eventStart, "}");
+  if (eventEnd < 0) return null;
+
+  i = eventEnd + 1;
+  while (i < lines.length && lines[i].trim() === "") i += 1;
+  if ((lines[i] || "").trim() !== EVENT_EXPRESSION_HEADER) return null;
+  const exprStart = i;
+  // Keep this tolerant while user is typing expression text (possibly with unclosed quotes).
+  const exprEnd = findClosingLineByToken(lines, exprStart, "}");
+  if (exprEnd < 0) return null;
+
+  i = exprEnd + 1;
+  while (i < lines.length && lines[i].trim() === "") i += 1;
+  return {
+    eventStart,
+    eventEnd,
+    exprStart,
+    exprEnd,
+    bodyStart: i,
+    eventsRaw: lines.slice(eventStart + 1, eventEnd).join("\n"),
+    eventExpressionRaw: lines.slice(exprStart + 1, exprEnd).join("\n"),
+  };
+};
+
+const stripOneMetaPairFromTop = (source: string): { removed: boolean; rest: string } => {
+  const parsed = parseMetaFromTop(source);
+  if (!parsed) return { removed: false, rest: source };
+  const lines = String(source || "").split("\n");
+  return { removed: true, rest: lines.slice(parsed.bodyStart).join("\n") };
+};
+
+const stripAllMetaPairsFromTop = (source: string) => {
+  let rest = String(source || "");
+  while (true) {
+    const pass = stripOneMetaPairFromTop(rest);
+    if (!pass.removed) return rest;
+    rest = pass.rest;
+  }
+};
+
+const splitMetaBlocks = (source: string): MetaBlocks => {
+  const result: MetaBlocks = { hasMeta: false, body: source, eventsRaw: "", eventExpressionRaw: "" };
+  const parsed = parseMetaFromTop(source);
+  if (!parsed) return result;
+  const lines = String(source || "").split("\n");
+  const body = lines.slice(parsed.bodyStart).join("\n");
+  return {
+    hasMeta: true,
+    body,
+    eventsRaw: parsed.eventsRaw,
+    eventExpressionRaw: parsed.eventExpressionRaw,
+  };
+};
+
+const buildEventsBlockBody = (triggerConfig: ScriptTriggerConfig) => {
+  const payload: Record<string, any> = { ...triggerConfig };
+  delete payload.ruleExpression;
+  const json = JSON.stringify(payload, null, 2);
+  const rows = json.split("\n");
+  if (rows.length <= 2) return '  "rules": []';
+  return rows.slice(1, -1).join("\n");
+};
+
+const composeCodeWithMeta = (body: string, triggerConfig: ScriptTriggerConfig) => {
+  const cleanBody = stripAllMetaPairsFromTop(splitMetaBlocks(body).body);
+  const eventsBody = buildEventsBlockBody(triggerConfig);
+  const expression = triggerConfig.ruleExpression || "";
+  return `${EVENTS_HEADER}\n${eventsBody}\n}\n${EVENT_EXPRESSION_HEADER}\n${expression}\n}\n\n${cleanBody}`;
+};
+
+const tryParseTriggerConfigFromBlocks = (
+  source: string,
+  fallback: ScriptTriggerConfig,
+): ScriptTriggerConfig | null => {
+  const split = splitMetaBlocks(source);
+  if (!split.hasMeta) return null;
+  try {
+    const parsedObject = JSON.parse(`{\n${split.eventsRaw}\n}`) as Record<string, any>;
+    const merged = normalizeScriptTriggerConfig({
+      ...fallback,
+      ...parsedObject,
+      ruleExpression: split.eventExpressionRaw || "",
+    });
+    return merged;
+  } catch {
+    return null;
+  }
+};
+
+const sanitizeCodeForExecution = (source: string) => {
+  const parsed = parseMetaFromTop(source);
+  if (!parsed) return source;
+  const lines = String(source || "").split("\n");
+
+  const commentAt = (idx: number) => {
+    const raw = lines[idx] ?? "";
+    lines[idx] = raw.trim().length === 0 ? "#" : `# ${raw}`;
+  };
+
+  for (let i = parsed.eventStart; i <= parsed.eventEnd; i += 1) commentAt(i);
+  for (let i = parsed.exprStart; i <= parsed.exprEnd; i += 1) commentAt(i);
+  return lines.join("\n");
 };
 
 const extractEntityIdsFromCode = (script: string, triggerConfig: ScriptTriggerConfig): string[] => {
@@ -70,6 +247,7 @@ const buildAutoParamsFromCode = (script: string): Record<string, any> => {
   const out: Record<string, any> = {};
   Array.from(vars)
     .filter((name) => name !== "ENUMS")
+    .filter((name) => name !== "COMMON")
     .filter((name) => !setAssigned.has(name))
     .filter((name) => !getAssigned.has(name))
     .sort()
@@ -77,6 +255,144 @@ const buildAutoParamsFromCode = (script: string): Record<string, any> => {
       out[name] = inferDefaultParamValue(name);
     });
   return out;
+};
+
+const PROMPT_MODE_LABELS: Record<PromptMode, string> = {
+  CREATE: "Create",
+  UPDATE: "Update",
+  OPTIMIZE: "Optimize",
+  API: "API",
+};
+
+const buildEntityContextLine = (entity: HAEntity): string => {
+  const attrs = entity.attributes || {};
+  const attrsPreview = Object.entries(attrs)
+    .filter(([key]) =>
+      [
+        "friendly_name",
+        "device_class",
+        "unit_of_measurement",
+        "supported_features",
+        "source",
+        "brightness",
+        "temperature",
+        "humidity",
+      ].includes(key),
+    )
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(", ");
+  return `- ${entity.entity_id} | state=${JSON.stringify(entity.state)}${attrsPreview ? ` | attrs: ${attrsPreview}` : ""}`;
+};
+
+const buildPromptText = (params: {
+  mode: PromptMode;
+  scriptName: string;
+  endpoint: string;
+  scriptCode: string;
+  selectedEntities: HAEntity[];
+  userMessage: string;
+  testParamsRaw: string;
+}): string => {
+  const {
+    mode,
+    scriptName,
+    endpoint,
+    scriptCode,
+    selectedEntities,
+    userMessage,
+    testParamsRaw,
+  } = params;
+  const entitySection =
+    selectedEntities.length > 0
+      ? selectedEntities.map((entity) => buildEntityContextLine(entity)).join("\n")
+      : "- No entities selected. Use only entities explicitly provided in user message.";
+  const testParamsSection = testParamsRaw.trim() ? testParamsRaw : "{}";
+
+  const modeInstruction =
+    mode === "CREATE"
+      ? [
+          "Mode: CREATE",
+          "Create a brand new HomeScript for this script endpoint. Do not reuse existing script code.",
+          "Return only valid HomeScript code.",
+        ].join("\n")
+      : mode === "UPDATE"
+        ? [
+            "Mode: UPDATE",
+            "Update the existing HomeScript based on my requested changes.",
+            "Preserve existing behavior unless the request explicitly changes it.",
+            "Return the full final HomeScript, not a diff.",
+          ].join("\n")
+        : mode === "OPTIMIZE"
+          ? [
+              "Mode: OPTIMIZE",
+              "Optimize the current HomeScript for readability, safety, and maintainability while preserving behavior.",
+              "Reduce redundant calls and simplify conditions where safe.",
+              "Return the full optimized HomeScript.",
+            ].join("\n")
+          : [
+              "Mode: API",
+              "Generate HomeScript specifically for this API endpoint behavior and contract.",
+              "Focus on request input validation, deterministic output, and safe SET/GET/CALL handling.",
+              "Return full HomeScript code and include REQUIRED/OPTIONAL declarations when needed.",
+            ].join("\n");
+
+  const includeCurrentCode = mode === "UPDATE" || mode === "OPTIMIZE" || mode === "API";
+  const currentCodeSection = includeCurrentCode
+    ? `\nCurrent HomeScript code:\n\`\`\`homescript\n${scriptCode || "# empty"}\n\`\`\`\n`
+    : "";
+
+  const apiSection =
+    mode === "API"
+      ? [
+          "API context:",
+          `- Run endpoint: POST /api/run/${endpoint || "<endpoint>"}`,
+          `- Webhook endpoint: POST /api/webhook/${endpoint || "<endpoint>"}`,
+          "- Authentication for /api/run/*: Bearer token or valid service credentials.",
+          "- /api/webhook/* may use signed webhook integration; avoid assumptions and implement defensive checks in script logic.",
+        ].join("\n")
+      : "";
+
+  return [
+    "You are an expert HomeScript generator.",
+    "",
+    modeInstruction,
+    "",
+    "Task context:",
+    `- Script name: ${scriptName || "(unnamed script)"}`,
+    `- Script endpoint: ${endpoint || "(missing endpoint)"}`,
+    "",
+    "HomeScript reference:",
+    "- Use uppercase keywords: REQUIRED, OPTIONAL, IF/ELSE/END_IF, WHILE/END_WHILE, SET, GET, CALL, PRINT, TEST, FUNCTION/END_FUNCTION, RETURN, IMPORT.",
+    "- REQUIRED/OPTIONAL declarations must be at the top of script.",
+    "- GET syntax: GET domain.entity INTO $var.",
+    "- SET syntax:",
+    "  - Variable: SET $var = expression",
+    "  - Entity state: SET domain.entity = expression",
+    "- CALL syntax: CALL domain.service(args).",
+    "- Keep logic deterministic and avoid invalid syntax.",
+    "",
+    "Built-in helper library reference:",
+    HOME_SCRIPT_COMMON_LLM_REFERENCE,
+    "",
+    "Entity access context (available devices/states):",
+    entitySection,
+    "",
+    "Input/test context (can be used for variable assumptions):",
+    "```json",
+    testParamsSection,
+    "```",
+    apiSection ? `\n${apiSection}\n` : "",
+    currentCodeSection,
+    "User request (append exactly):",
+    userMessage?.trim() || "(No extra user message provided)",
+    "",
+    "Output requirements:",
+    "- Return only final HomeScript code.",
+    "- No markdown explanations.",
+    "- Ensure it is runnable and complete.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 };
 
 export default function ScriptEditor() {
@@ -115,29 +431,36 @@ END_IF`);
   const [haServices, setHaServices] = useState<HAServices>({});
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showRuleBuilder, setShowRuleBuilder] = useState(false);
+  const [eventEditorDraft, setEventEditorDraft] = useState<ScriptTriggerConfig | null>(null);
+  const [eventEditorNotice, setEventEditorNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   // Debugger State
   const [breakpoints, setBreakpoints] = useState<number[]>([]);
   const [isDebugging, setIsDebugging] = useState(false);
   const [currentLine, setCurrentLine] = useState<number | null>(null);
-  const debugResolver = useRef<((action: "CONTINUE" | "STEP" | "STOP") => void) | null>(null);
+  const debugResolver = useRef<((action: "CONTINUE" | "STOP") => void) | null>(null);
   const debugStopRequestedRef = useRef(false);
+  const debugPausedRef = useRef(false);
+  const [debugPaused, setDebugPaused] = useState(false);
   const [showDebugMenu, setShowDebugMenu] = useState(false);
   const [debugToolsEnabled, setDebugToolsEnabled] = useState(false);
   const debugToolsEnabledRef = useRef(false);
-  const [debugRunMode, setDebugRunMode] = useState<DebugRunMode>("manual");
   const [debugLineDelayMs, setDebugLineDelayMs] = useState(180);
-  const [debugHighlightLines, setDebugHighlightLines] = useState(false);
   const [debugMissingParams, setDebugMissingParams] = useState<string[]>([]);
   const [debugPromotePulse, setDebugPromotePulse] = useState(false);
   const saveHandlerRef = useRef<(() => Promise<void>) | null>(null);
   const decorationIds = useRef<string[]>([]);
   const completionProviderRef = useRef<any>(null);
+  const foldingProviderRef = useRef<any>(null);
   const homescriptLangRegisteredRef = useRef(false);
   const remoteReplayTimerRef = useRef<number | null>(null);
   const lastRemoteSessionIdRef = useRef<string | null>(null);
   const debugDraftSyncTimerRef = useRef<number | null>(null);
   const debugEnabledAtRef = useRef<number | null>(null);
+  const eventEditorNoticeTimerRef = useRef<number | null>(null);
+  const metaAutoCollapsedRef = useRef(false);
+  const metaUserExpandedRef = useRef(false);
+  const collapseMetaTimerRef = useRef<number | null>(null);
 
   const [services, setServices] = useState<any[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -146,6 +469,14 @@ END_IF`);
   const [backendMeta, setBackendMeta] = useState<BackendRunMeta | null>(null);
   const [frontendMeta, setFrontendMeta] = useState<Record<string, any> | null>(null);
   const [debugInputError, setDebugInputError] = useState<string | null>(null);
+  const [promptMode, setPromptMode] = useState<PromptMode>("CREATE");
+  const [promptUserMessage, setPromptUserMessage] = useState("");
+  const [promptEntitySearch, setPromptEntitySearch] = useState("");
+  const [promptSelectedEntityIds, setPromptSelectedEntityIds] = useState<string[]>([]);
+  const [promptCopied, setPromptCopied] = useState(false);
+  const [showPromptGenerator, setShowPromptGenerator] = useState(false);
+  const promptEntityTouchedRef = useRef(false);
+  const promptCopiedTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     debugToolsEnabledRef.current = debugToolsEnabled;
@@ -178,6 +509,101 @@ END_IF`);
     setHaStateEvents([]);
     setBackendMeta(null);
     setFrontendMeta(null);
+  };
+
+  const promptBodyCode = useMemo(() => splitMetaBlocks(code).body, [code]);
+  const promptReferencedEntityIds = useMemo(
+    () => extractEntityIdsFromCode(promptBodyCode, triggerConfig),
+    [promptBodyCode, triggerConfig],
+  );
+  const promptEntityMap = useMemo(() => {
+    const map = new Map<string, HAEntity>();
+    haEntities.forEach((entity) => map.set(entity.entity_id, entity));
+    return map;
+  }, [haEntities]);
+  const promptSelectedEntities = useMemo(
+    () => promptSelectedEntityIds.map((idValue) => promptEntityMap.get(idValue)).filter((entity): entity is HAEntity => Boolean(entity)),
+    [promptEntityMap, promptSelectedEntityIds],
+  );
+  const promptVisibleEntities = useMemo(() => {
+    const query = promptEntitySearch.trim().toLowerCase();
+    const sorted = [...haEntities].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+    if (!query) return sorted.slice(0, 200);
+    return sorted
+      .filter((entity) => {
+        const friendly = String(entity.attributes?.friendly_name || "").toLowerCase();
+        return entity.entity_id.toLowerCase().includes(query) || friendly.includes(query);
+      })
+      .slice(0, 200);
+  }, [haEntities, promptEntitySearch]);
+  const promptGeneratedText = useMemo(
+    () =>
+      buildPromptText({
+        mode: promptMode,
+        scriptName: name.trim(),
+        endpoint: endpoint.trim(),
+        scriptCode: promptBodyCode,
+        selectedEntities: promptSelectedEntities,
+        userMessage: promptUserMessage,
+        testParamsRaw: testParams,
+      }),
+    [promptMode, name, endpoint, promptBodyCode, promptSelectedEntities, promptUserMessage, testParams],
+  );
+
+  useEffect(() => {
+    if (promptEntityTouchedRef.current) return;
+    if (haEntities.length === 0) return;
+    const autoIds = promptReferencedEntityIds.filter((entityId) => promptEntityMap.has(entityId));
+    if (autoIds.length === 0) return;
+    setPromptSelectedEntityIds(autoIds);
+  }, [haEntities, promptReferencedEntityIds, promptEntityMap]);
+
+  useEffect(() => () => {
+    if (promptCopiedTimerRef.current) {
+      window.clearTimeout(promptCopiedTimerRef.current);
+      promptCopiedTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!showPromptGenerator) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowPromptGenerator(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showPromptGenerator]);
+
+  const togglePromptEntity = (entityId: string) => {
+    promptEntityTouchedRef.current = true;
+    setPromptSelectedEntityIds((prev) => {
+      if (prev.includes(entityId)) {
+        return prev.filter((value) => value !== entityId);
+      }
+      return [...prev, entityId];
+    });
+  };
+
+  const handlePromptCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(promptGeneratedText);
+      setPromptCopied(true);
+      if (promptCopiedTimerRef.current) {
+        window.clearTimeout(promptCopiedTimerRef.current);
+      }
+      promptCopiedTimerRef.current = window.setTimeout(() => {
+        setPromptCopied(false);
+      }, 1800);
+    } catch {
+      setPromptCopied(false);
+      addEvent({
+        source: "frontend",
+        level: "error",
+        message: "Failed to copy prompt to clipboard",
+      });
+    }
   };
 
   const applyRemoteDebugReplay = (payload: any, createdAt: string) => {
@@ -245,11 +671,83 @@ END_IF`);
     }, intervalMs);
   };
 
+  const pushEventEditorNotice = (type: "success" | "error", message: string) => {
+    setEventEditorNotice({ type, message });
+    if (eventEditorNoticeTimerRef.current) {
+      window.clearTimeout(eventEditorNoticeTimerRef.current);
+      eventEditorNoticeTimerRef.current = null;
+    }
+    eventEditorNoticeTimerRef.current = window.setTimeout(() => {
+      setEventEditorNotice(null);
+    }, 2600);
+  };
+
   const handleCodeChange = (nextCode: string) => {
     setCode(nextCode);
     if (!debugToolsEnabled) {
       setMainCode(nextCode);
     }
+  };
+
+  const openEventEditor = () => {
+    const parsed = tryParseTriggerConfigFromBlocks(code, triggerConfig);
+    if (parsed) {
+      setEventEditorDraft(parsed);
+      pushEventEditorNotice("success", "Loaded event config from code blocks.");
+    } else {
+      setEventEditorDraft(normalizeScriptTriggerConfig(triggerConfig));
+      pushEventEditorNotice("error", "Could not parse event blocks from code. Loaded last saved config.");
+    }
+    setShowRuleBuilder(true);
+  };
+
+  const saveEventEditor = () => {
+    if (!eventEditorDraft) {
+      pushEventEditorNotice("error", "Event editor has no draft to save.");
+      return;
+    }
+    const normalized = normalizeScriptTriggerConfig(eventEditorDraft);
+    const nextCode = composeCodeWithMeta(code, normalized);
+    setCode(nextCode);
+    if (!debugToolsEnabled) setMainCode(nextCode);
+    setTriggerConfig(normalized);
+    setShowRuleBuilder(false);
+    pushEventEditorNotice("success", "Event blocks saved into script.");
+  };
+
+  const getMetaHeaderLines = (source: string) => {
+    const lines = String(source || "").split("\n");
+    const out: number[] = [];
+    lines.forEach((raw, idx) => {
+      const t = raw.trim();
+      if (t.startsWith(EVENTS_HEADER) || t.startsWith(EVENT_EXPRESSION_HEADER)) out.push(idx + 1);
+    });
+    return out;
+  };
+
+  const collapseMetaBlocksIfNeeded = (force = false) => {
+    const editor = editorRef.current;
+    if (!editor || !debugToolsEnabled) return;
+    if (metaUserExpandedRef.current && !force) return;
+    const model = editor.getModel?.();
+    const value = model?.getValue?.() ?? code;
+    const headerLines = getMetaHeaderLines(value);
+    if (headerLines.length === 0) return;
+    const hiddenAreas = editor.getHiddenAreas?.() || [];
+    const isHidden = (line: number) =>
+      hiddenAreas.some((r: any) => line >= r.startLineNumber && line <= r.endLineNumber);
+    headerLines.forEach((lineNumber) => {
+      if (isHidden(lineNumber)) return;
+      editor.setPosition?.({ lineNumber, column: 1 });
+      const foldAction = editor.getAction?.("editor.fold");
+      const maybePromise = foldAction?.run?.();
+      if (maybePromise && typeof maybePromise.then === "function") {
+        maybePromise.catch(() => {
+          // Monaco can cancel fold actions during rapid model updates.
+        });
+      }
+    });
+    metaAutoCollapsedRef.current = true;
   };
 
   const toggleDebugTools = async () => {
@@ -277,6 +775,8 @@ END_IF`);
       setCode(mainCode);
       setDebugLiveSyncStatus("idle");
       lastRemoteSessionIdRef.current = null;
+      metaAutoCollapsedRef.current = false;
+      metaUserExpandedRef.current = false;
       await persistMode(false);
       if (remoteReplayTimerRef.current) {
         window.clearInterval(remoteReplayTimerRef.current);
@@ -306,8 +806,11 @@ END_IF`);
     setDebugToolsEnabled(true);
     setShowDebugMenu(true);
     debugEnabledAtRef.current = Date.now();
+    metaAutoCollapsedRef.current = false;
+    metaUserExpandedRef.current = false;
     await persistMode(true);
-    setCode(nextDebugCode && nextDebugCode.trim().length > 0 ? nextDebugCode : code);
+    const source = nextDebugCode && nextDebugCode.trim().length > 0 ? nextDebugCode : code;
+    setCode(composeCodeWithMeta(splitMetaBlocks(source).body, triggerConfig));
   };
 
   // Keyboard Shortcuts
@@ -410,6 +913,8 @@ END_IF`);
       monaco.languages.setMonarchTokensProvider("homescript", {
         tokenizer: {
           root: [
+            [/^(\s*)([@]events)(\s*)(\{)/, ["white", "meta.block.tag", "white", "json.delimiter.bracket"], "@metaJson"],
+            [/^(\s*)([@]event_expression)(\s*)(\{)/, ["white", "meta.block.tag", "white", "json.delimiter.bracket"], "@metaJson"],
             [/^(\s*LABEL)(\s+)([a-zA-Z_][a-zA-Z0-9_]*)/, ["keyword.flow", "", "label.name"]],
             [/^(\s*GOTO)(\s+)([a-zA-Z_][a-zA-Z0-9_]*)/, ["keyword.flow", "", "label.name"]],
             [/\b(REQUIRED|OPTIONAL)\b/, "keyword.decl"],
@@ -427,11 +932,51 @@ END_IF`);
             [/\\./, "string.escape"],
             [/"/, { token: "string.quote", next: "@pop" }],
           ],
+          metaJson: [
+            [/\}/, { token: "json.delimiter.bracket", next: "@pop" }],
+            [/\{/, "json.delimiter.bracket"],
+            [/\[/, "json.delimiter.array"],
+            [/\]/, "json.delimiter.array"],
+            [/,/, "json.delimiter.comma"],
+            [/:/, "json.delimiter.colon"],
+            [/"([^"\\]|\\.)*"/, "json.string"],
+            [/-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?/, "json.number"],
+            [/\b(true|false)\b/, "json.boolean"],
+            [/\bnull\b/, "json.null"],
+            [/[A-Za-z_][A-Za-z0-9_]*/, "json.property"],
+            [/\s+/, "white"],
+          ],
+        },
+      });
+
+      // Folding for @events / @event_expression blocks
+      foldingProviderRef.current?.dispose?.();
+      foldingProviderRef.current = monaco.languages.registerFoldingRangeProvider("homescript", {
+        provideFoldingRanges: (model) => {
+          const ranges: any[] = [];
+          const lineCount = model.getLineCount();
+          const allLines = Array.from({ length: lineCount }, (_, idx) => model.getLineContent(idx + 1));
+          for (let ln = 1; ln <= lineCount; ln += 1) {
+            const trimmed = model.getLineContent(ln).trim();
+            if (trimmed === EVENTS_HEADER || trimmed === EVENT_EXPRESSION_HEADER) {
+              const endIdx = findMatchingBraceLine(allLines, ln - 1);
+              const end = endIdx >= 0 ? endIdx + 1 : -1;
+              if (end > ln) {
+                ranges.push({
+                  start: ln,
+                  end,
+                  kind: monaco.languages.FoldingRangeKind.Region,
+                });
+              }
+            }
+          }
+          return ranges;
         },
       });
 
       // Autocomplete
       completionProviderRef.current?.dispose?.();
+      const buildCommonLibSuggestions = createCommonLibMonacoSuggestionFactory(monaco);
       completionProviderRef.current = monaco.languages.registerCompletionItemProvider("homescript", {
         provideCompletionItems: (model, position) => {
           const word = model.getWordUntilPosition(position);
@@ -443,6 +988,21 @@ END_IF`);
           };
 
           const suggestions: any[] = [
+            {
+              label: "@events block",
+              kind: monaco.languages.CompletionItemKind.Snippet,
+              insertText:
+                '@events {\n  "logic": "OR",\n  "rules": [\n    {\n      "id": "rule-${1:id}",\n      "name": "${2:Event 1}",\n      "entityId": "${3:light.kitchen}",\n      "eventType": "toggle",\n      "toggleFrom": "any",\n      "toggleTo": "any",\n      "toggleFromCustom": "",\n      "toggleToCustom": "",\n      "previewScale": "linear",\n      "levels": [\n        { "id": "level-1", "name": "Level 1", "value": 25 },\n        { "id": "level-2", "name": "Level 2", "value": 50 },\n        { "id": "level-3", "name": "Level 3", "value": 75 }\n      ],\n      "rangeMin": 0,\n      "rangeMax": 100\n    }\n  ]\n}\n@event_expression {\n$0\n}\n',
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
+            {
+              label: "@event_expression sample",
+              kind: monaco.languages.CompletionItemKind.Snippet,
+              insertText: '@event_expression {\n$${1:EVENT_1} AND $${1:EVENT_1}_VALUE == "on"\n}',
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              range,
+            },
             {
               label: "REQUIRED",
               kind: monaco.languages.CompletionItemKind.Keyword,
@@ -578,6 +1138,8 @@ END_IF`);
             },
           ];
 
+          suggestions.push(...buildCommonLibSuggestions(range));
+
           // Dynamically add services from HA
           if (Object.keys(haServices).length > 0) {
             Object.entries(haServices).forEach(([domain, domainServices]) => {
@@ -651,6 +1213,16 @@ END_IF`);
         rules: [
           { token: "keyword.flow", foreground: "C586C0", fontStyle: "bold" },
           { token: "keyword.decl", foreground: "4FC1FF", fontStyle: "bold" },
+          { token: "meta.block.tag", foreground: "F97316", fontStyle: "bold" },
+          { token: "json.property", foreground: "9CDCFE" },
+          { token: "json.string", foreground: "CE9178" },
+          { token: "json.number", foreground: "B5CEA8" },
+          { token: "json.boolean", foreground: "569CD6", fontStyle: "bold" },
+          { token: "json.null", foreground: "569CD6" },
+          { token: "json.delimiter.bracket", foreground: "D4D4D4" },
+          { token: "json.delimiter.array", foreground: "D4D4D4" },
+          { token: "json.delimiter.comma", foreground: "D4D4D4" },
+          { token: "json.delimiter.colon", foreground: "D4D4D4" },
           { token: "variable", foreground: "9CDCFE" },
           { token: "function", foreground: "DCDCAA" }, // Function color
           { token: "label.name", foreground: "FF8C00", fontStyle: "italic bold" },
@@ -670,6 +1242,8 @@ END_IF`);
     return () => {
       completionProviderRef.current?.dispose?.();
       completionProviderRef.current = null;
+      foldingProviderRef.current?.dispose?.();
+      foldingProviderRef.current = null;
     };
   }, [monaco, services, haServices, haEntities]);
 
@@ -677,7 +1251,7 @@ END_IF`);
     if (!editorRef.current || !monaco) return;
     const model = editorRef.current.getModel();
     if (!model) return;
-    const diagnostics = validateHomeScript(code);
+    const diagnostics = validateHomeScript(sanitizeCodeForExecution(code));
     const markers = diagnostics.map((d) => ({
       startLineNumber: d.line,
       startColumn: 1,
@@ -697,16 +1271,27 @@ END_IF`);
       })
         .then((res) => res.json())
         .then((data) => {
+          const parsedTriggerConfig = (() => {
+            if (data.trigger_config) {
+              try {
+                return normalizeScriptTriggerConfig(JSON.parse(data.trigger_config));
+              } catch {
+                return normalizeScriptTriggerConfig({});
+              }
+            }
+            return normalizeScriptTriggerConfig({});
+          })();
           setName(data.name);
           setEndpoint(data.endpoint);
           const persistedDebugEnabled = Boolean(data.debug_enabled);
           const incomingDebugCode = typeof data.debug_code === "string" ? data.debug_code : null;
-          const nextCode = persistedDebugEnabled && incomingDebugCode && incomingDebugCode.trim().length > 0 ? incomingDebugCode : data.code;
+          const sourceCode = persistedDebugEnabled && incomingDebugCode && incomingDebugCode.trim().length > 0 ? incomingDebugCode : data.code;
+          const nextCode = composeCodeWithMeta(splitMetaBlocks(sourceCode).body, parsedTriggerConfig);
           setDebugToolsEnabled(persistedDebugEnabled);
           setShowDebugMenu(persistedDebugEnabled);
           debugEnabledAtRef.current = persistedDebugEnabled ? Date.now() : null;
           setCode(nextCode);
-          setMainCode(data.code);
+          setMainCode(composeCodeWithMeta(splitMetaBlocks(data.code).body, parsedTriggerConfig));
           setStoredDebugCode(incomingDebugCode);
           if (data.test_params) {
             setTestParams(data.test_params);
@@ -715,14 +1300,7 @@ END_IF`);
           if (savedMockStates) {
             setMockDeviceStatesJson(savedMockStates);
           }
-          if (data.trigger_config) {
-            try {
-              const parsed = JSON.parse(data.trigger_config);
-              setTriggerConfig(normalizeScriptTriggerConfig(parsed));
-            } catch {
-              setTriggerConfig(normalizeScriptTriggerConfig({}));
-            }
-          }
+          setTriggerConfig(parsedTriggerConfig);
         });
     }
   }, [id]);
@@ -756,6 +1334,8 @@ END_IF`);
       setSaveError("Script code is required");
       return;
     }
+    const effectiveTriggerConfig = tryParseTriggerConfigFromBlocks(codeToSave, triggerConfig) || triggerConfig;
+    setTriggerConfig(effectiveTriggerConfig);
 
     setSaving(true);
     setSaveError(null);
@@ -774,7 +1354,7 @@ END_IF`);
         endpoint: finalEndpoint,
         code: codeToSave,
         testParams,
-        triggerConfig: JSON.stringify(triggerConfig),
+        triggerConfig: JSON.stringify(effectiveTriggerConfig),
       }),
     });
 
@@ -851,8 +1431,9 @@ END_IF`);
   };
 
   const buildAutoInputBundle = () => {
-    const autoParams = buildAutoParamsFromCode(code);
-    const entityIds = extractEntityIdsFromCode(code, triggerConfig);
+    const bodyCode = splitMetaBlocks(code).body;
+    const autoParams = buildAutoParamsFromCode(bodyCode);
+    const entityIds = extractEntityIdsFromCode(bodyCode, triggerConfig);
     const autoMockStates: Record<string, any> = {};
     entityIds.forEach((entityId) => {
       const found = haEntities.find((e) => e.entity_id === entityId);
@@ -1039,6 +1620,8 @@ END_IF`);
     clearMarkers();
     resetExecutionConsole();
     setIsDebugging(true);
+    setDebugPaused(false);
+    debugPausedRef.current = false;
     setCurrentLine(null);
     debugStopRequestedRef.current = false;
     addEvent({
@@ -1096,15 +1679,11 @@ END_IF`);
     setFrontendMeta({
       mode: "debug",
       parseOk: true,
-      runMode: debugRunMode,
       lineDelayMs: debugLineDelayMs,
-      highlightAllLines: debugHighlightLines,
       missingParams: [...debugMissingParams],
       runCommand: {
         mode: "debug",
-        runMode: debugRunMode,
         lineDelayMs: debugLineDelayMs,
-        highlightAllLines: debugHighlightLines,
         breakpoints: [...breakpoints],
         params,
         mockStates: runtimeMockStates,
@@ -1113,7 +1692,13 @@ END_IF`);
       },
     });
 
-    const activeBreakpoints = [...breakpoints];
+    const executableLines = sanitizeCodeForExecution(code)
+      .split("\n")
+      .map((raw, idx) => ({ line: idx + 1, content: raw.trim() }))
+      .filter((l) => l.content.length > 0 && !l.content.startsWith("#"))
+      .map((l) => l.line);
+    const userBreakpoints = new Set(breakpoints);
+    const activeBreakpoints = executableLines;
     const safeDelay = Math.max(0, Math.min(5000, Number(debugLineDelayMs) || 0));
 
     const engine = new HomeScriptEngine({
@@ -1252,15 +1837,16 @@ END_IF`);
           setCurrentLine(line);
           setVariables(vars);
           if (debugStopRequestedRef.current) return "STOP";
-          if (debugRunMode === "auto") {
-            if (safeDelay > 0) {
-              await new Promise<void>((resolve) => {
-                window.setTimeout(() => resolve(), safeDelay);
-              });
-            }
-            if (debugStopRequestedRef.current) return "STOP";
-            return "CONTINUE";
+          if (safeDelay > 0) {
+            await new Promise<void>((resolve) => {
+              window.setTimeout(() => resolve(), safeDelay);
+            });
           }
+          if (debugStopRequestedRef.current) return "STOP";
+          const shouldPause = debugPausedRef.current || userBreakpoints.has(line);
+          if (!shouldPause) return "CONTINUE";
+          setDebugPaused(true);
+          debugPausedRef.current = true;
           return new Promise((resolve) => {
             debugResolver.current = resolve;
           });
@@ -1268,7 +1854,7 @@ END_IF`);
     });
 
     try {
-      const result = await engine.execute(code);
+      const result = await engine.execute(sanitizeCodeForExecution(code));
       setOutput(result.output);
       setVariables(result.variables);
       addEvent({
@@ -1297,22 +1883,35 @@ END_IF`);
       }
     } finally {
         setIsDebugging(false);
+        setDebugPaused(false);
+        debugPausedRef.current = false;
         setCurrentLine(null);
         debugResolver.current = null;
         debugStopRequestedRef.current = false;
     }
   };
 
-  const handleContinue = () => {
+  const handleDebugPlay = () => {
+      if (!debugToolsEnabled) return;
+      if (!isDebugging) {
+        void handleDebug();
+        return;
+      }
+      setDebugPaused(false);
+      debugPausedRef.current = false;
       if (debugResolver.current) debugResolver.current("CONTINUE");
   };
 
-  const handleStep = () => {
-      if (debugResolver.current) debugResolver.current("STEP");
+  const handleDebugPause = () => {
+      if (!debugToolsEnabled || !isDebugging) return;
+      setDebugPaused(true);
+      debugPausedRef.current = true;
   };
 
   const handleStop = () => {
       debugStopRequestedRef.current = true;
+      setDebugPaused(false);
+      debugPausedRef.current = false;
       if (debugResolver.current) debugResolver.current("STOP");
   };
 
@@ -1599,7 +2198,7 @@ END_IF`);
     });
 
     try {
-      const result = await engine.execute(code);
+      const result = await engine.execute(sanitizeCodeForExecution(code));
       setOutput(result.output);
       setVariables(result.variables);
       addEvent({
@@ -1700,10 +2299,35 @@ END_IF`);
   }, [code, debugToolsEnabled, id, isDebugging]);
 
   useEffect(() => {
+    if (!debugToolsEnabled) return;
+    if (collapseMetaTimerRef.current) {
+      window.clearTimeout(collapseMetaTimerRef.current);
+      collapseMetaTimerRef.current = null;
+    }
+    collapseMetaTimerRef.current = window.setTimeout(() => {
+      collapseMetaBlocksIfNeeded(false);
+    }, 50);
+    return () => {
+      if (collapseMetaTimerRef.current) {
+        window.clearTimeout(collapseMetaTimerRef.current);
+        collapseMetaTimerRef.current = null;
+      }
+    };
+  }, [code, debugToolsEnabled]);
+
+  useEffect(() => {
     return () => {
       if (debugDraftSyncTimerRef.current) {
         window.clearTimeout(debugDraftSyncTimerRef.current);
         debugDraftSyncTimerRef.current = null;
+      }
+      if (eventEditorNoticeTimerRef.current) {
+        window.clearTimeout(eventEditorNoticeTimerRef.current);
+        eventEditorNoticeTimerRef.current = null;
+      }
+      if (collapseMetaTimerRef.current) {
+        window.clearTimeout(collapseMetaTimerRef.current);
+        collapseMetaTimerRef.current = null;
       }
       if (remoteReplayTimerRef.current) {
         window.clearInterval(remoteReplayTimerRef.current);
@@ -1713,7 +2337,7 @@ END_IF`);
   }, []);
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950">
+    <div className="flex flex-col h-[100dvh] overflow-hidden bg-zinc-950">
       <header className="flex flex-col md:flex-row items-start md:items-center justify-between p-4 gap-4 border-b border-zinc-800 bg-zinc-900">
         <div className="flex flex-wrap items-center gap-4 w-full md:w-auto">
           <Button
@@ -1762,59 +2386,71 @@ END_IF`);
           >
             <Save className={`w-5 h-5 ${saving ? "animate-spin" : ""}`} />
           </Button>
+          {id && (
+            <Button
+              variant="secondary"
+              size="icon"
+              onClick={() => setShowPromptGenerator(true)}
+              title="Open Prompt Generator"
+              className="bg-indigo-700 hover:bg-indigo-600"
+            >
+              <WandSparkles className="w-5 h-5" />
+            </Button>
+          )}
           
-          {isDebugging ? (
+          <Button
+            size="icon"
+            className="bg-indigo-600 hover:bg-indigo-500"
+            onClick={handleRunLocal}
+            title="Local Run"
+          >
+            <Laptop className="w-5 h-5" />
+          </Button>
+          <Button
+            size="icon"
+            className={debugToolsEnabled ? "bg-orange-600 hover:bg-orange-500" : "bg-zinc-800 hover:bg-zinc-700 text-zinc-400"}
+            onClick={() => { void toggleDebugTools(); }}
+            title={debugToolsEnabled ? "Disable Debug Mode" : "Enable Debug Mode"}
+          >
+            <Bug className="w-5 h-5" />
+          </Button>
+          {debugToolsEnabled ? (
             <>
               <Button
                 size="icon"
-                onClick={handleContinue}
-                title="Continue"
+                className={isDebugging ? "bg-emerald-600 hover:bg-emerald-500" : "bg-emerald-700 hover:bg-emerald-600"}
+                onClick={handleDebugPlay}
+                title={isDebugging ? "Resume" : "Start Debug"}
               >
                 <Play className="w-5 h-5" />
               </Button>
               <Button
                 size="icon"
-                className="bg-blue-600 hover:bg-blue-500"
-                onClick={handleStep}
-                title="Step"
+                className={debugPaused ? "bg-amber-600 hover:bg-amber-500" : "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"}
+                onClick={handleDebugPause}
+                title="Pause"
+                disabled={!isDebugging}
               >
-                <ArrowRight className="w-5 h-5" />
+                <Pause className="w-5 h-5" />
               </Button>
               <Button
                 size="icon"
                 className="bg-red-600 hover:bg-red-500"
                 onClick={handleStop}
                 title="Stop"
+                disabled={!isDebugging}
               >
-                <StopCircle className="w-5 h-5" />
+                <Square className="w-5 h-5" />
               </Button>
             </>
           ) : (
-            <>
-              <Button
-                size="icon"
-                className="bg-indigo-600 hover:bg-indigo-500"
-                onClick={handleRunLocal}
-                title="Local Run"
-              >
-                <Laptop className="w-5 h-5" />
-              </Button>
-              <Button
-                size="icon"
-                className={debugToolsEnabled ? "bg-orange-600 hover:bg-orange-500" : "bg-zinc-800 hover:bg-zinc-700 text-zinc-400"}
-                onClick={() => { void toggleDebugTools(); }}
-                title={debugToolsEnabled ? "Disable Debug Mode" : "Enable Debug Mode"}
-              >
-                <Bug className="w-5 h-5" />
-              </Button>
-              <Button
-                size="icon"
-                onClick={handleRunServer}
-                title="Server Run"
-              >
-                <Play className="w-5 h-5" />
-              </Button>
-            </>
+            <Button
+              size="icon"
+              onClick={handleRunServer}
+              title="Server Run"
+            >
+              <Play className="w-5 h-5" />
+            </Button>
           )}
         </div>
       </header>
@@ -1852,6 +2488,20 @@ END_IF`);
                     });
                   }
                 });
+
+                editor.onDidChangeHiddenAreas(() => {
+                  if (!metaAutoCollapsedRef.current) return;
+                  const model = editor.getModel();
+                  if (!model) return;
+                  const headers = getMetaHeaderLines(model.getValue());
+                  if (headers.length === 0) return;
+                  const hiddenAreas = editor.getHiddenAreas?.() || [];
+                  const isHidden = (line: number) =>
+                    hiddenAreas.some((r: any) => line >= r.startLineNumber && line <= r.endLineNumber);
+                  if (headers.some((line) => !isHidden(line))) {
+                    metaUserExpandedRef.current = true;
+                  }
+                });
               }}
               options={{
                 minimap: { enabled: false },
@@ -1867,14 +2517,19 @@ END_IF`);
             <div className="absolute inset-x-4 top-4 bottom-14 z-20 bg-zinc-950/95 border border-zinc-800 rounded-2xl overflow-hidden">
               <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
                 <h3 className="text-sm font-medium text-zinc-200">Event Builder</h3>
-                <Button size="sm" variant="ghost" onClick={() => setShowRuleBuilder(false)}>
-                  Close
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="secondary" onClick={saveEventEditor}>
+                    Save Events
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setShowRuleBuilder(false)}>
+                    Close
+                  </Button>
+                </div>
               </div>
               <div className="p-4 h-[calc(100%-53px)] overflow-y-auto">
               <EventTriggerConfigurator
-                value={triggerConfig}
-                onChange={setTriggerConfig}
+                value={eventEditorDraft || triggerConfig}
+                onChange={setEventEditorDraft}
                 entities={haEntities}
               />
               </div>
@@ -1883,7 +2538,13 @@ END_IF`);
           <div className="h-10 border-t border-zinc-800 bg-zinc-900/60 px-3 flex items-center justify-end">
             <button
               type="button"
-              onClick={() => setShowRuleBuilder((prev) => !prev)}
+              onClick={() => {
+                if (showRuleBuilder) {
+                  setShowRuleBuilder(false);
+                } else {
+                  openEventEditor();
+                }
+              }}
               className="text-xs font-mono text-zinc-300 hover:text-emerald-300 transition-colors"
             >
               {showRuleBuilder ? "Collapse Event Builder" : "Expand Event Builder"}
@@ -1910,18 +2571,13 @@ END_IF`);
               <div className="mb-4 rounded-xl border border-orange-700/40 bg-orange-950/20 p-3 space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <h3 className="text-sm font-medium text-orange-200 uppercase tracking-wider">Debug Menu</h3>
-                  <Button
-                    size="sm"
-                    className="bg-orange-600 hover:bg-orange-500"
-                    onClick={handleDebug}
-                    disabled={isDebugging}
-                  >
-                    {isDebugging ? "Debug Running..." : "Start Debug Run"}
-                  </Button>
+                  <span className={`text-xs font-medium ${isDebugging ? (debugPaused ? "text-amber-200" : "text-emerald-300") : "text-zinc-400"}`}>
+                    {isDebugging ? (debugPaused ? "Paused" : "Running") : "Idle"}
+                  </span>
                 </div>
                 <div className="rounded-lg border border-orange-800/50 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-300">
                   <div>
-                    Live Debug Draft: edits auto-sync{ id ? " to database `debug_code`" : "" }. Execution runs only via Start Debug Run or debug API call.
+                    Live Debug Draft: edits auto-sync{ id ? " to database `debug_code`" : "" }. Use top-bar Play/Pause/Stop in Debug mode.
                   </div>
                   <div className="mt-1">
                     Save button always writes main script (non-debug) code.
@@ -1963,17 +2619,6 @@ END_IF`);
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs text-zinc-400">Run Mode</label>
-                    <select
-                      value={debugRunMode}
-                      onChange={(e) => setDebugRunMode(e.target.value as DebugRunMode)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-orange-500"
-                    >
-                      <option value="auto">Auto play lines</option>
-                      <option value="manual">Manual step/continue</option>
-                    </select>
-                  </div>
-                  <div className="flex flex-col gap-1.5">
                     <label className="text-xs text-zinc-400">Line Highlight Delay (ms)</label>
                     <input
                       type="number"
@@ -1985,15 +2630,6 @@ END_IF`);
                     />
                   </div>
                 </div>
-                <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
-                  <input
-                    type="checkbox"
-                    checked={debugHighlightLines}
-                    onChange={(e) => setDebugHighlightLines(e.target.checked)}
-                    className="rounded border-zinc-700 bg-zinc-900"
-                  />
-                  Highlight every executed line
-                </label>
                 <div>
                   <div className="text-xs text-zinc-400 mb-2">
                     Simulate missing params (removed before debug run, useful for REQUIRED tests)
@@ -2120,13 +2756,128 @@ END_IF`);
               backendMeta={backendMeta}
               frontendMeta={frontendMeta}
               isDebugging={isDebugging}
-              onContinue={handleContinue}
-              onStep={handleStep}
+              onContinue={handleDebugPlay}
+              onStep={handleDebugPause}
               onStop={handleStop}
             />
           </div>
         </div>
       </div>
+      {id && showPromptGenerator && (
+        <div className="fixed inset-0 z-[140]">
+          <div
+            className="absolute inset-0 bg-black/65"
+            onClick={() => setShowPromptGenerator(false)}
+          />
+          <div className="absolute inset-4 md:inset-10 lg:inset-16 bg-zinc-950 border border-indigo-900/60 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between gap-2 bg-zinc-900">
+              <h3 className="text-sm font-medium text-indigo-200 uppercase tracking-wider flex items-center gap-2">
+                <WandSparkles className="w-4 h-4" />
+                LLM Prompt Generator
+              </h3>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="secondary" onClick={() => { void handlePromptCopy(); }}>
+                  {promptCopied ? <Check className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
+                  {promptCopied ? "Copied" : "Copy Prompt"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setShowPromptGenerator(false)}>
+                  Close
+                </Button>
+              </div>
+            </div>
+            <div className="p-4 overflow-y-auto space-y-3">
+              <div className="text-xs text-zinc-300">
+                Generates a copy-ready prompt with script context, HomeScript rules, API details, and selected HA entities.
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {(Object.keys(PROMPT_MODE_LABELS) as PromptMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setPromptMode(mode)}
+                    className={`px-2 py-1.5 rounded-lg text-xs border transition-colors ${
+                      promptMode === mode
+                        ? "border-indigo-500/80 bg-indigo-500/20 text-indigo-100"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
+                    }`}
+                  >
+                    {PROMPT_MODE_LABELS[mode]}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs text-zinc-400">Entities to include in prompt context</label>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        promptEntityTouchedRef.current = true;
+                        setPromptSelectedEntityIds(promptReferencedEntityIds.filter((entityId) => promptEntityMap.has(entityId)));
+                      }}
+                    >
+                      Select Referenced
+                    </Button>
+                  </div>
+                  <input
+                    type="text"
+                    value={promptEntitySearch}
+                    onChange={(e) => setPromptEntitySearch(e.target.value)}
+                    placeholder="Search entities by id or friendly name..."
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500"
+                  />
+                  <div className="max-h-64 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900 p-2 space-y-1">
+                    {promptVisibleEntities.length === 0 ? (
+                      <div className="text-xs text-zinc-500 px-1 py-1">No entities found.</div>
+                    ) : (
+                      promptVisibleEntities.map((entity) => {
+                        const checked = promptSelectedEntityIds.includes(entity.entity_id);
+                        return (
+                          <label
+                            key={entity.entity_id}
+                            className={`flex items-center gap-2 rounded-md px-2 py-1 text-xs cursor-pointer border ${
+                              checked
+                                ? "border-indigo-700/70 bg-indigo-900/30 text-indigo-100"
+                                : "border-zinc-800 bg-zinc-900/40 text-zinc-300"
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => togglePromptEntity(entity.entity_id)}
+                              className="accent-indigo-500"
+                            />
+                            <span className="font-mono">{entity.entity_id}</span>
+                            <span className="text-zinc-500 truncate">{String(entity.attributes?.friendly_name || entity.state)}</span>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs text-zinc-400">Extra user message appended to prompt</label>
+                    <textarea
+                      value={promptUserMessage}
+                      onChange={(e) => setPromptUserMessage(e.target.value)}
+                      placeholder="Describe what you want AI to create/update/optimize..."
+                      className="w-full h-28 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-200 text-sm resize-none focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-zinc-400">Copy-ready prompt output</label>
+                  <textarea
+                    value={promptGeneratedText}
+                    readOnly
+                    className="w-full h-[32rem] bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono resize-none focus:outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <CommandPalette
         isOpen={showCommandPalette}
         onClose={() => setShowCommandPalette(false)}
@@ -2142,6 +2893,18 @@ END_IF`);
             }
         }}
       />
+      {eventEditorNotice && (
+        <div
+          className={`fixed top-4 right-4 z-[120] rounded-xl border px-4 py-3 text-sm shadow-xl ${
+            eventEditorNotice.type === "error"
+              ? "border-red-700/60 bg-red-950/90 text-red-200"
+              : "border-emerald-700/60 bg-emerald-950/90 text-emerald-200"
+          }`}
+        >
+          {eventEditorNotice.message}
+        </div>
+      )}
+      {debugToolsEnabled && <FloatingVariablesPanel variables={variables} />}
     </div>
   );
 }
