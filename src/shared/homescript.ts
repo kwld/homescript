@@ -1,6 +1,7 @@
 import { evaluateHomeScriptExpression } from "./homescript/expression.js";
 import { collectIfCondition, ScriptLine } from "./homescript/if-condition.js";
 import { HOME_SCRIPT_ENUMS } from "./homescript/enums.js";
+import { HOME_SCRIPT_COMMON } from "./homescript/common-lib.js";
 
 export class HomeScriptError extends Error {
   constructor(message: string, public line: number) {
@@ -63,7 +64,7 @@ export class HomeScriptEngine {
   private gotoGuard: number = 0;
   
   constructor(options: HomeScriptOptions = {}) {
-    this.variables = { ...(options.variables || {}), ENUMS: HOME_SCRIPT_ENUMS };
+    this.variables = { ...(options.variables || {}), ENUMS: HOME_SCRIPT_ENUMS, COMMON: HOME_SCRIPT_COMMON };
     this.queryParams = { ...(options.queryParams || {}) };
     this.onCall = options.onCall;
     this.onGet = options.onGet;
@@ -77,7 +78,7 @@ export class HomeScriptEngine {
 
   public async execute(code: string): Promise<{ output: string[], variables: Record<string, any> }> {
     this.emitEvent({ type: "execution_start", level: "info", message: "Execution started" });
-    const lines: ScriptLine[] = code.split('\n').map((l, i) => ({ content: l.trim(), lineNumber: i + 1 }));
+    const lines = this.preprocessLines(code);
     this.validateTopDeclarations(lines);
     this.registerLabels(lines);
     
@@ -87,6 +88,69 @@ export class HomeScriptEngine {
     await this.executeBlock(lines, 0, lines.length, false);
     this.emitEvent({ type: "execution_end", level: "success", message: "Execution completed" });
     return { output: this.output, variables: this.variables };
+  }
+
+  private preprocessLines(code: string): ScriptLine[] {
+    const rawLines = code.split("\n");
+    const lines: ScriptLine[] = [];
+    let configBlockDepth = 0;
+
+    rawLines.forEach((raw, index) => {
+      const trimmed = raw.trim();
+
+      if (configBlockDepth > 0) {
+        configBlockDepth += this.calculateBraceDelta(trimmed);
+        if (configBlockDepth < 0) configBlockDepth = 0;
+        lines.push({ content: "", lineNumber: index + 1 });
+        return;
+      }
+
+      if (this.isConfigBlockStart(trimmed)) {
+        configBlockDepth = this.calculateBraceDelta(trimmed);
+        if (configBlockDepth < 0) configBlockDepth = 0;
+        lines.push({ content: "", lineNumber: index + 1 });
+        return;
+      }
+
+      lines.push({ content: trimmed, lineNumber: index + 1 });
+    });
+
+    return lines;
+  }
+
+  private isConfigBlockStart(line: string): boolean {
+    return /^@[a-zA-Z_][a-zA-Z0-9_]*\s*\{/.test(line);
+  }
+
+  private calculateBraceDelta(line: string): number {
+    let delta = 0;
+    let inSingle = false;
+    let inDouble = false;
+    let escaped = false;
+
+    for (const ch of line) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (!inDouble && ch === "'") {
+        inSingle = !inSingle;
+        continue;
+      }
+      if (!inSingle && ch === '"') {
+        inDouble = !inDouble;
+        continue;
+      }
+      if (inSingle || inDouble) continue;
+      if (ch === "{") delta += 1;
+      if (ch === "}") delta -= 1;
+    }
+
+    return delta;
   }
 
   private emitEvent(event: HomeScriptTraceEvent) {

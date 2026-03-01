@@ -63,7 +63,7 @@ export default function ExecutionConsole({
           {isDebugging && (
             <>
               <Button size="sm" onClick={onContinue}>Continue</Button>
-              <Button size="sm" className="bg-blue-600 hover:bg-blue-500" onClick={onStep}>Step</Button>
+              <Button size="sm" className="bg-amber-600 hover:bg-amber-500" onClick={onStep}>Pause</Button>
               <Button size="sm" className="bg-red-600 hover:bg-red-500" onClick={onStop}>Stop</Button>
             </>
           )}

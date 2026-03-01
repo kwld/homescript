@@ -165,8 +165,10 @@ const evaluateTrigger = (config: ScriptTriggerConfig, data: StateChangedData) =>
     };
   });
 
-  const varMap = ruleStates.reduce<Record<string, boolean>>((acc, rule) => {
+  const varMap = ruleStates.reduce<Record<string, any>>((acc, rule) => {
     acc[rule.varName] = rule.matched;
+    acc[`${rule.varName}_VALUE`] = rule.value ?? null;
+    acc[`${rule.varName}_NAME`] = rule.name ?? "";
     return acc;
   }, {});
 

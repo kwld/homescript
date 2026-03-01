@@ -368,6 +368,18 @@ describe("HomeScriptEngine", () => {
     expect(onSetCalls).toEqual([{ entityId: "light.test", state: "off" }]);
   });
 
+  it("should expose built-in $COMMON math/string/array helpers", async () => {
+    const engine = new HomeScriptEngine();
+    const result = await engine.execute(`
+      PRINT $COMMON.math.clamp(13, 0, 10)
+      PRINT $COMMON.math.round(3.14159, 2)
+      PRINT $COMMON.string.upper("living room")
+      PRINT $COMMON.array.join($COMMON.string.split("a,b,c", ","), "|")
+      PRINT $COMMON.array.length([1,2,3,4])
+    `);
+    expect(result.output).toEqual(["10", "3.14", "LIVING ROOM", "a|b|c", "4"]);
+  });
+
   it("should inject REQUIRED and OPTIONAL variables from query params", async () => {
     const engine = new HomeScriptEngine({
       queryParams: { mode: "night" },
@@ -398,6 +410,23 @@ describe("HomeScriptEngine", () => {
         REQUIRED $mode
       `),
     ).rejects.toThrow("must be at the top of script");
+  });
+
+  it("should ignore @ config blocks during execution", async () => {
+    const engine = new HomeScriptEngine();
+    const result = await engine.execute(`
+      @events {
+        "logic": "OR",
+        "rules": [
+          { "id": "r1", "entityId": "light.kitchen" }
+        ]
+      }
+      @event_expression {
+        $EVENT_1
+      }
+      PRINT "after config"
+    `);
+    expect(result.output).toEqual(["after config"]);
   });
 
   it("should support LABEL and GOTO", async () => {

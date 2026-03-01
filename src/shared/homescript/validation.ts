@@ -3,11 +3,45 @@ export type HomeScriptDiagnostic = {
   message: string;
 };
 
+const isConfigBlockStart = (line: string) => /^@[a-zA-Z_][a-zA-Z0-9_]*\s*\{/.test(line);
+
+const calculateBraceDelta = (line: string): number => {
+  let delta = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (const ch of line) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (!inDouble && ch === "'") {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (!inSingle && ch === '"') {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+    if (ch === "{") delta += 1;
+    if (ch === "}") delta -= 1;
+  }
+
+  return delta;
+};
+
 export const validateHomeScript = (code: string): HomeScriptDiagnostic[] => {
   const diagnostics: HomeScriptDiagnostic[] = [];
   const rawLines = code.split("\n");
 
   let declarationZoneActive = true;
+  let metaBlockDepth = 0;
   const labelLines = new Map<string, number>();
   const gotoRefs: Array<{ label: string; line: number }> = [];
   const stack: Array<{ kind: "IF" | "WHILE" | "FUNCTION"; line: number }> = [];
@@ -16,6 +50,17 @@ export const validateHomeScript = (code: string): HomeScriptDiagnostic[] => {
     const lineNumber = idx + 1;
     const line = raw.trim();
     if (!line || line.startsWith("#")) return;
+
+    if (metaBlockDepth > 0) {
+      metaBlockDepth += calculateBraceDelta(line);
+      if (metaBlockDepth < 0) metaBlockDepth = 0;
+      return;
+    }
+    if (isConfigBlockStart(line)) {
+      metaBlockDepth = calculateBraceDelta(line);
+      if (metaBlockDepth < 0) metaBlockDepth = 0;
+      return;
+    }
 
     const isReqOpt = line.startsWith("REQUIRED ") || line.startsWith("OPTIONAL ");
     if (declarationZoneActive) {

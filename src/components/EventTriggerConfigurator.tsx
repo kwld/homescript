@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { useMonaco } from "@monaco-editor/react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   createDefaultTriggerRule,
@@ -82,6 +82,8 @@ const generatePreviewData = (min: number, max: number) => {
 };
 
 export default function EventTriggerConfigurator({ value, onChange, entities }: EventTriggerConfiguratorProps) {
+  const monaco = useMonaco();
+  const completionProviderRef = useRef<any>(null);
   const [selectedRuleId, setSelectedRuleId] = useState<string>(value.rules[0]?.id || "");
   const [dragLevelId, setDragLevelId] = useState<string | null>(null);
   const [historyPoints, setHistoryPoints] = useState<Array<{ ts: string; value: number; state?: string }>>([]);
@@ -229,6 +231,120 @@ export default function EventTriggerConfigurator({ value, onChange, entities }: 
     valueRef.current = next;
     onChange(next);
   };
+
+  useEffect(() => {
+    if (!monaco) return;
+    completionProviderRef.current?.dispose?.();
+    completionProviderRef.current = monaco.languages.registerCompletionItemProvider("homescript", {
+      triggerCharacters: ["$", ".", "_"],
+      provideCompletionItems: (model, position) => {
+        const word = model.getWordUntilPosition(position);
+        const range = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        };
+
+        const suggestions: any[] = [
+          {
+            label: "AND",
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: "AND",
+            range,
+          },
+          {
+            label: "OR",
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: "OR",
+            range,
+          },
+          {
+            label: "NOT",
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: "NOT",
+            range,
+          },
+          {
+            label: "\"on\"",
+            kind: monaco.languages.CompletionItemKind.Value,
+            insertText: "\"on\"",
+            range,
+          },
+          {
+            label: "\"off\"",
+            kind: monaco.languages.CompletionItemKind.Value,
+            insertText: "\"off\"",
+            range,
+          },
+          {
+            label: "\"unknown\"",
+            kind: monaco.languages.CompletionItemKind.Value,
+            insertText: "\"unknown\"",
+            range,
+          },
+          {
+            label: "\"unavailable\"",
+            kind: monaco.languages.CompletionItemKind.Value,
+            insertText: "\"unavailable\"",
+            range,
+          },
+        ];
+
+        value.rules.forEach((rule) => {
+          const varName = toRuleVarName(rule.name).toUpperCase();
+          suggestions.push(
+            {
+              label: `$${varName}`,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: `$${varName}`,
+              detail: "boolean: event matched",
+              range,
+            },
+            {
+              label: `$${varName}_VALUE`,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: `$${varName}_VALUE`,
+              detail: "event value",
+              range,
+            },
+            {
+              label: `$${varName}_NAME`,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: `$${varName}_NAME`,
+              detail: "event display name",
+              range,
+            },
+            {
+              label: `${varName} == true`,
+              kind: monaco.languages.CompletionItemKind.Snippet,
+              insertText: `$${varName} == true`,
+              range,
+            },
+            {
+              label: `${varName}_VALUE == \"on\"`,
+              kind: monaco.languages.CompletionItemKind.Snippet,
+              insertText: `$${varName}_VALUE == \"on\"`,
+              range,
+            },
+          );
+        });
+
+        const seen = new Set<string>();
+        const deduped = suggestions.filter((item) => {
+          const key = `${item.label}::${item.insertText}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        return { suggestions: deduped };
+      },
+    });
+    return () => {
+      completionProviderRef.current?.dispose?.();
+      completionProviderRef.current = null;
+    };
+  }, [monaco, value.rules]);
 
   const updateRule = (ruleId: string, patch: Partial<TriggerRule>) => {
     const current = valueRef.current;
@@ -427,13 +543,15 @@ export default function EventTriggerConfigurator({ value, onChange, entities }: 
   };
 
   const runRuleDebugger = () => {
-    const vars: Record<string, boolean> = {};
+    const vars: Record<string, any> = {};
     const details: string[] = [];
 
     value.rules.forEach((rule) => {
       const result = evaluateRuleMatch(rule);
       const varName = toRuleVarName(rule.name).toUpperCase();
       vars[varName] = result.ok;
+      vars[`${varName}_VALUE`] = debugNewState;
+      vars[`${varName}_NAME`] = rule.name || "";
       details.push(`${varName}: ${result.ok ? "true" : "false"} (${result.reason})`);
     });
 
@@ -459,9 +577,12 @@ export default function EventTriggerConfigurator({ value, onChange, entities }: 
     if (!expr) return null;
     try {
       const probeVars = value.rules.reduce<Record<string, boolean>>((acc, rule) => {
-        acc[toRuleVarName(rule.name)] = false;
+        const base = toRuleVarName(rule.name).toUpperCase();
+        (acc as any)[base] = false;
+        (acc as any)[`${base}_VALUE`] = "";
+        (acc as any)[`${base}_NAME`] = "";
         return acc;
-      }, {});
+      }, {} as Record<string, any>);
       evaluateHomeScriptExpression(expr, probeVars);
       return null;
     } catch (e: any) {
@@ -474,7 +595,8 @@ export default function EventTriggerConfigurator({ value, onChange, entities }: 
       <div className="space-y-2">
         <div className="text-sm font-medium text-zinc-300">Event Expression (HomeScript-style)</div>
         <div className="text-xs text-zinc-400">
-          Use variables by event name: {value.rules.map((rule) => `$${toRuleVarName(rule.name)}`).join(", ") || "(add events)"}.
+          Use event variables: {value.rules.map((rule) => `$${toRuleVarName(rule.name).toUpperCase()}`).join(", ") || "(add events)"}.
+          Value compare: <code>$EVENT_NAME_VALUE == "on"</code>. Name compare: <code>$EVENT_NAME_NAME == "Event 1"</code>.
           Operators: <code>AND</code>, <code>OR</code>, <code>NOT</code>, parentheses.
           Type only condition body; <code>IF</code> / <code>END_IF</code> are added automatically.
         </div>
@@ -491,6 +613,9 @@ export default function EventTriggerConfigurator({ value, onChange, entities }: 
               fontSize: 13,
               lineNumbers: "off",
               wordWrap: "on",
+              quickSuggestions: true,
+              suggestOnTriggerCharacters: true,
+              tabCompletion: "on",
               scrollBeyondLastLine: false,
               padding: { top: 8, bottom: 8 },
             }}

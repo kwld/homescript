@@ -23,4 +23,31 @@ describe("validateHomeScript TEST diagnostics", () => {
     `);
     expect(diagnostics.some((d) => d.message.includes("TEST requires regex literal"))).toBe(true);
   });
+
+  it("should allow REQUIRED/OPTIONAL after @events and @event_expression blocks", () => {
+    const diagnostics = validateHomeScript(`
+      @events {
+        "logic": "OR",
+        "rules": []
+      }
+      @event_expression {
+      }
+      REQUIRED $token
+      OPTIONAL $name = "guest"
+      PRINT "ok"
+    `);
+    expect(diagnostics.some((d) => d.message.includes("REQUIRED/OPTIONAL must be at the top"))).toBe(false);
+  });
+
+  it("should ignore generic @ config blocks for top declarations", () => {
+    const diagnostics = validateHomeScript(`
+      @phone_events {
+        "meta": { "nested": true },
+        "items": []
+      }
+      REQUIRED $token
+      PRINT "ok"
+    `);
+    expect(diagnostics.some((d) => d.message.includes("REQUIRED/OPTIONAL must be at the top"))).toBe(false);
+  });
 });
